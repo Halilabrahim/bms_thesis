@@ -30,7 +30,7 @@ THESIS_SCOPE = (
 )
 
 THESIS_TITLE = "Python Based Development of Battery Management System Functions"
-ADVISOR = "Sternad, Prof. Dr. techn. Michael"
+ADVISOR = "Prof. Dr. techn. Michael Sternad"
 INDUSTRY_ADVISOR = "Harun Köle — Technical Manager at Saves Enerji"
 START_DATE = date(2025, 9, 24)
 SUBMISSION_DEADLINE = date(2026, 3, 24)
