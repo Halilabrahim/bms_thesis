@@ -232,7 +232,7 @@ st.markdown(
 """
 )
 
-st.subheader("Known limitations / TODO")
+st.subheader("Known limitations")
 st.markdown(
     """
 - The rack model is *reference-inspired* and intentionally simplified (no proprietary control loops).

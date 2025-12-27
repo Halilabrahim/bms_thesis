@@ -60,23 +60,21 @@ with st.expander("Original thesis proposal (as submitted)", expanded=True):
 Develop a Python-based simulation framework to implement and evaluate key Battery Management System (BMS) functions for battery energy storage systems (BESS). The focus is on safe operation, robust fault handling, and reproducible validation under both normal operating conditions and fault scenarios.
 
 **Scope**  
-A) **Charge/Discharge Control and Derating**
-- Current limiting and derating based on battery SoC, cell voltages, and temperature limits.
-- Clear visibility of I_req versus I_act to demonstrate derating behavior.
+BMS Functions: Development in Python of core BMS tasks:
 
-B) **Safety Monitoring and Protection**
-- Safety monitoring and emergency protocols (e.g., over-temperature, over-voltage, fire detection leading to system shutdown and activation of a fire suppression mechanism).
-- Threshold-based detection with debouncing where applicable.
+Charging/discharging control based on battery SoC, cell voltages, and temperature limits.
 
-C) **Optional**
-- SoH impact studies (simplified scaling) may be included as an optional extension.
+Safety monitoring and emergency protocols 
+(e.g., over-temperature, over-voltage, fire detection leading to system shutdown and activation of a fire suppression mechanism).
+
+**Optional**  
+SoC/SoH estimation to support decision-making.
 
 **Evaluation**  
-Simulation of these functions under varying conditions and load demands. The focus is robustness, safety, and operational feasibility.
+Simulation of these functions under varying conditions and load demands. The focus will be on robustness, safety, and operational feasibility.
 
 **Expected contribution**  
-A Python-based framework that demonstrates how BMS algorithms ensure safe and reliable battery operation under different operating and fault scenarios, including emergency response cases.
-"""
+The outcome will be a Python-based framework that demonstrates how BMS algorithms ensure safe and reliable battery operation under different operating and fault scenarios, including emergency response cases."""
     )
 
 with st.expander("What has been implemented in this app", expanded=True):
@@ -96,7 +94,7 @@ with st.expander("What has been implemented in this app", expanded=True):
 - Reproducible export as **.npz** including scenario meta and segment definitions.
 
 **Planned / next**
-- References & Validation page: parameter provenance, topology sanity checks, validation snapshots, known limitations/TODOs.
+- References & Validation page: parameter provenance, topology sanity checks, validation snapshots, known limitations.
 """
     )
 
