@@ -1,0 +1,143 @@
+meta:
+  system_name: "Rack model inspired by Huawei LUNA2000-2.0MWH-1HX"
+  version: "0.1"
+
+chemistry:
+  name: "LFP"
+  nominal_cell_voltage_v: 3.2
+  cell_capacity_ah: 320.0
+
+structure:
+  cells_in_series_per_pack: 16
+  cells_in_parallel_per_pack: 1
+  packs_in_series_per_rack: 21
+  racks_in_ess: 6
+
+pack:
+  rated_voltage_v: 51.2          # 16 × 3.2 V
+  nominal_energy_kwh: 16.38      # Huawei pack spec
+  cell_voltage_min_v: 2.5
+  cell_voltage_max_v: 3.65       # Absolute max (chemistry/top safety)
+
+rack:
+  nominal_voltage_v: 1075.2      # 3.2 V × 16 × 21
+  nominal_energy_kwh: 344.0      # ≈ 16.38 × 21
+  v_min_v: 840.0                 # 2.5 × 16 × 21
+  v_max_v: 1226.4                # 3.65 × 16 × 21
+
+hardware:
+  rated_operating_voltage_v: 1200.0   # Smart Rack Controller bus rated
+  max_dc_voltage_v: 1500.0            # Smart Rack Controller max DC
+  min_startup_voltage_v: 350.0        # battery-side minimum start
+  rated_power_per_string_kw: 172.0
+  rated_power_per_rack_kw: 344.0
+  rated_current_per_string_a: 143.3
+  rated_current_per_rack_a: 286.6
+
+electrical_model:
+  type: "ECM_2RC"
+  q_nom_ah: 320.0
+  ocv_soc_table_file: "data/ocv_lfp_320ah.csv"
+  r0_ohm: 0.05
+  r1_ohm: 0.02
+  c1_f: 5000.0
+  r2_ohm: 0.01
+  c2_f: 20000.0
+
+soh_profiles:
+  fresh:
+    capacity_scale: 1.0
+    r0_scale: 1.0
+  aged_80cap_150r0:
+    capacity_scale: 0.8   # kapasite %80
+    r0_scale: 1.5         # R0 %50 artmış
+
+thermal_model:
+  type: "lumped_RC"
+  c_th_j_per_k: 3.0e6
+  r_th_k_per_w: 0.2
+  t_init_c: 25.0
+
+limits:
+  v_cell_min_v: 2.5
+  v_cell_max_v: 3.5
+  v_rack_min_v: 840.0
+  v_rack_max_v: 1226.4
+  t_min_c: -20.0
+  t_max_c: 55.0
+  i_charge_max_a: 320.0
+  i_discharge_max_a: 320.0
+  i_derating_temp_c: 40.0
+
+estimation:
+  soc_method: "EKF"
+  soh_method: "R0_and_capacity"
+  ekf:
+    q_process:
+      soc: 1.0e-7
+      v_rc1: 1.0e-5
+      v_rc2: 1.0e-5
+    r_measurement:
+      v_terminal: 1.0e-4
+    initial_covariance:
+      soc: 1.0e-3
+      v_rc1: 1.0e-2
+      v_rc2: 1.0e-2
+  soh:
+    r0_nominal_ohm: 0.05
+    q_nominal_ah: 320.0
+    adaptation_gain_q: 1.0e-6
+    adaptation_gain_r0: 1.0e-6
+
+sensors:
+  voltage_noise_std_v: 0.02      # terminal voltage ölçüm gürültüsü (std)
+  current_noise_std_a: 0.5      # akım ölçüm gürültüsü (std)
+  temp_noise_std_c: 0.1         # sıcaklık sensörü gürültüsü (std)
+  seed: 42                      # tekrar üretilebilir sonuç için
+
+bms_control:
+  # SoC tabanlı limitleme
+  soc_low_cutoff: 0.05          # bunun altında deşarj yok
+  soc_low_derate_start: 0.10    # 10% altından itibaren kademeli azalt
+  soc_high_cutoff: 0.95         # bunun üstünde şarj yok
+  soc_high_derate_start: 0.90   # 90% üstünden itibaren kademeli azalt
+
+  # Sıcaklık tabanlı limitleme
+  t_low_cutoff_c: -10.0         # altında ne şarj ne deşarj
+  t_low_derate_start_c: 0.0     # 0 °C’den aşağıda kademeli azalt
+  t_high_cutoff_c: 55.0         # üstünde akım yok (safety)
+  t_high_derate_start_c: 45.0   # 45–55 °C arası kademeli azalt
+
+  # Hücre voltajına göre limitleme (marginli)
+  v_margin_v: 0.05              # max/min hücre limitine 50 mV kala derate
+
+faults:
+  debounce_steps: 3          # kaç adım üst üste ihlal olursa fault latch olsun
+  ov_cell_v: 3.48            # over-voltage (hücre)
+  uv_cell_v: 2.5             # under-voltage (hücre)
+  ot_rack_c: 50.0            # over-temperature (rack)
+  ut_rack_c: -20.0           # under-temperature (rack)
+  oc_discharge_a: 400.0      # discharge over-current eşiği (> rated 320 A)
+  oc_charge_a: 400.0         # charge over-current
+  fire_temp_c: 80.0          # çok yüksek sıcaklık → fire event
+  fire_dTdt_c_per_s: 0.05    # hızlı sıcaklık artışı → fire (0.05 °C/s = 3 °C/dk)
+
+fire_detection:
+    gas_threshold_ppm: 2000        # gaz sensörü yangın eşiği
+    temp_threshold_c: 80.0         # çok yüksek rack sıcaklığı
+    dTdt_threshold_c_per_s: 0.5    # ani sıcaklık artışı eşiği
+    debounce_steps: 3              # art arda kaç sample görürse fire saysın
+
+cell_variation:
+  enable: true              # hücre varyasyonu aktif
+  capacity_sigma_rel: 0.05  # kapasite için ±%5 civarı
+  r0_sigma_rel: 0.05        # R0 için ±%5 civarı
+  soc0_sigma_abs: 0.02      # başlangıç SoC için ±0.02 (±2 puan)
+  q_spread_pct: 5.0         # kapasite için ±%5
+  r0_spread_pct: 5.0        # ohmic R0 için ±%5
+  seed: 123                 # tekrar üretilebilirlik için
+
+simulation:
+  dt_s: 1.0
+  t_end_s: 3600.0
+  log_interval_s: 1.0

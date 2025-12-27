@@ -1,0 +1,169 @@
+from typing import Dict, List, Any, Optional
+import math
+
+
+def _first_true_time(time_s: List[float], flags: List[bool]) -> Optional[float]:
+    """Return first time where flag is True, or None if never."""
+    for t, f in zip(time_s, flags):
+        if f:
+            return float(t)
+    return None
+
+
+def compute_safety_metrics(
+    result: Dict[str, List[Any]],
+    dt_s: float,
+) -> Dict[str, Optional[float]]:
+    """
+    Safety-related metrics:
+      - first fault time (any of OV/UV/OT/OC/FIRE)
+      - first emergency shutdown time (state_code == 3)
+      - individual fault detection times
+    """
+    time_s = result["time_s"]
+    state_code = result["state_code"]
+    oc = result["oc"]
+    ov = result["ov"]
+    uv = result["uv"]
+    ot = result["ot"]
+    fire = result["fire"]
+
+    t_oc = _first_true_time(time_s, oc)
+    t_ov = _first_true_time(time_s, ov)
+    t_uv = _first_true_time(time_s, uv)
+    t_ot = _first_true_time(time_s, ot)
+    t_fire = _first_true_time(time_s, fire)
+
+    any_fault_flags = [
+        (o or v or u or tt or ff)
+        for o, v, u, tt, ff in zip(oc, ov, uv, ot, fire)
+    ]
+    t_fault_any = _first_true_time(time_s, any_fault_flags)
+
+    emergency_flags = [code == 3 for code in state_code]
+    t_emergency = _first_true_time(time_s, emergency_flags)
+
+    return {
+        "t_fault_any_s": t_fault_any,
+        "t_emergency_s": t_emergency,
+        "t_oc_s": t_oc,
+        "t_ov_s": t_ov,
+        "t_uv_s": t_uv,
+        "t_ot_s": t_ot,
+        "t_fire_s": t_fire,
+    }
+
+
+def compute_operational_metrics(
+    result: Dict[str, List[float]],
+    dt_s: float,
+) -> Dict[str, Optional[float]]:
+    """
+    Operational / thermal metrics:
+      - total discharge energy [kWh] (I>0 assumed discharge)
+      - soc drop (soc_start - soc_end)
+      - total simulation time
+      - active discharge time (I>0)
+      - max rack temperature and delta-T
+    """
+    time_s = result["time_s"]
+    i_act = result["i_act_a"]
+    v_rack = result["v_rack_v"]
+    soc_true = result["soc_true"]
+    t_rack = result["t_rack_c"]
+
+    if not time_s:
+        return {
+            "energy_discharge_kwh": None,
+            "soc_delta": None,
+            "t_total_s": None,
+            "t_discharge_s": None,
+            "t_max_c": None,
+            "delta_t_c": None,
+        }
+
+    # Toplam süre (son nokta + bir dt)
+    t_total_s = (time_s[-1] - time_s[0]) + dt_s
+
+    energy_discharge_j = 0.0
+    energy_charge_j = 0.0
+    energy_net_j = 0.0
+    energy_abs_j = 0.0
+
+    discharge_time_s = 0.0
+    charge_time_s = 0.0
+
+    for i, v in zip(i_act, v_rack):
+        p = v * i  # W (işaretli)
+        energy_net_j += p * dt_s
+        energy_abs_j += abs(p) * dt_s
+
+        if i > 0.0:
+            energy_discharge_j += p * dt_s
+            discharge_time_s += dt_s
+        elif i < 0.0:
+            # şarj enerjisini pozitif büyüklük olarak raporlamak için -p kullanıyoruz
+            energy_charge_j += (-p) * dt_s
+            charge_time_s += dt_s
+
+    energy_discharge_kwh = energy_discharge_j / 3.6e6
+    energy_charge_kwh = energy_charge_j / 3.6e6
+    energy_net_kwh = energy_net_j / 3.6e6
+    energy_abs_kwh = energy_abs_j / 3.6e6
+
+    soc_delta = soc_true[0] - soc_true[-1]
+
+    t_max_c = max(t_rack)
+    delta_t_c = t_max_c - t_rack[0]
+
+    return {
+        "energy_discharge_kwh": energy_discharge_kwh,
+        "energy_charge_kwh": energy_charge_kwh,
+        "energy_net_kwh": energy_net_kwh,
+        "energy_abs_kwh": energy_abs_kwh,
+        "soc_delta": soc_delta,
+        "t_total_s": t_total_s,
+        "t_discharge_s": discharge_time_s,
+        "t_charge_s": charge_time_s,
+        "t_max_c": t_max_c,
+        "delta_t_c": delta_t_c,
+    }
+
+
+def compute_estimation_metrics(
+    result: Dict[str, List[float]],
+) -> Dict[str, Optional[float]]:
+    """
+    Estimation performance metrics for SoC:
+      - RMSE
+      - max absolute error
+      - 95th percentile absolute error
+    """
+    soc_true = result["soc_true"]
+    soc_hat = result["soc_hat"]
+
+    n = len(soc_true)
+    if n == 0 or n != len(soc_hat):
+        return {
+            "rmse_soc": None,
+            "max_abs_error_soc": None,
+            "p95_abs_error_soc": None,
+        }
+
+    errors = [hat - true for hat, true in zip(soc_hat, soc_true)]
+    mse = sum(e * e for e in errors) / n
+    rmse = math.sqrt(mse)
+
+    abs_errors = [abs(e) for e in errors]
+    max_abs_err = max(abs_errors)
+
+    # 95. yüzde
+    abs_errors_sorted = sorted(abs_errors)
+    idx_95 = int(0.95 * (n - 1))
+    p95_err = abs_errors_sorted[idx_95]
+
+    return {
+        "rmse_soc": rmse,
+        "max_abs_error_soc": max_abs_err,
+        "p95_abs_error_soc": p95_err,
+    }

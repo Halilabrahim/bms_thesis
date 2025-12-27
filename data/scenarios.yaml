@@ -1,0 +1,146 @@
+scenarios:
+  - id: "S1_nominal_25C_1C"
+    description: "Nominal 1C discharge at 25°C with BMS current limitation."
+    t_amb_c: 25.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0       # requested current (BMS kısabilir)
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+
+  - id: "S2_nominal_0C_1C"
+    description: "Nominal 1C discharge at 0°C ambient."
+    t_amb_c: 0.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+
+  - id: "S3_nominal_45C_1C"
+    description: "Nominal 1C discharge at 45°C ambient."
+    t_amb_c: 45.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+
+  - id: "S4_OC_fault_25C"
+    description: "Over-current fault at 25°C with 500 A request (BMS limits bypassed)."
+    t_amb_c: 25.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 500.0       # > oc_discharge_a
+      use_bms_limits: false  # <-- YENİ
+    stop_conditions:
+      max_time_s: 60.0
+      stop_on_emergency: true
+
+  - id: "S5_UV_fault_25C"
+    description: "Deep discharge at 25°C with BMS current limits bypassed to provoke undervoltage."
+    t_amb_c: 25.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0        # 1C civarı deşarj
+      use_bms_limits: false   # SoC tabanlı derating yok, derine iniyoruz
+    stop_conditions:
+      max_time_s: 5000.0      # 1 saatten biraz uzun, UV'ye düşmek için yeter
+      stop_on_emergency: true
+
+  - id: "S6_OT_fault_45C"
+    description: "High-current discharge at 45°C with BMS current limits bypassed to provoke over-temperature."
+    t_amb_c: 45.0
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0        # oc_discharge_a=400'ün altında kalsın ki OC değil OT olsun
+      use_bms_limits: false   # BMS akım limiti kapalı → daha çok ısınma
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+
+  - id: "S7_FIRE_event_25C"
+    description: "Fire / gas sensor alarm at 25°C, leading to emergency shutdown."
+    t_amb_c: 25.0
+
+    profile:
+      type: "constant_current"
+      direction: "discharge"
+      current_a: 320.0          # S1 ile aynı akım, istersen değiştir
+      use_bms_limits: true      # normal BMS limitleri açık
+
+    stop_conditions:
+      max_time_s: 1800.0        # 30 dakika simülasyon
+      stop_on_emergency: false  # emergency olsa da sim devam etsin (I=0)
+
+    fire_inject_time_s: 1200.0  # <-- 20. dakikada gaz alarmı (fire) tetikleniyor
+
+  - id: S8_CC_charge_25C
+    description: "Constant-current charge at 0.5C (≈160 A) at 25°C with BMS limits."
+    t_amb_c: 25.0
+    profile:
+      type: constant_current
+      direction: charge
+      current_a: 160.0        # 0.5C civarı
+      use_bms_limits: true    # BMS akımı SoC ve sıcaklığa göre kısıtlayacak
+    init:
+      true_soc: 0.50
+      ekf_soc: 0.50
+    stop_conditions:
+      max_time_s: 3600.0      # 1 saatlik şarj
+      stop_on_emergency: true
+
+  - id: S9_CC_charge_0C
+    description: "Constant-current charge at 0.5C (≈160 A) at 0°C with BMS limits."
+    t_amb_c: 0.0
+    profile:
+      type: constant_current
+      direction: charge
+      current_a: 160.0
+      use_bms_limits: true
+    init:
+        true_soc: 0.50
+        ekf_soc: 0.50
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+
+  - id: "S10_nominal_25C_1C_AGED"
+    description: "Nominal 1C discharge at 25°C with aged pack (80% capacity, 1.5x R0)."
+    t_amb_c: 25.0
+    profile:
+      type: constant_current
+      direction: discharge
+      current_a: 320.0   # S1 ile aynı akımı kullanıyorsan o değeri yaz
+      use_bms_limits: true
+    stop_conditions:
+      max_time_s: 3600.0
+      stop_on_emergency: true
+    soh_profile:
+      capacity_rel: 0.8   # %80 kapasite
+      r0_mult: 1.5        # R0 * 1.5
+      soh_profile: aged_0p8Q_1p5R0
+
+
+  - id: S11_OV_fault_25C
+    description: "Constant-current charge at 0.5C from full SoC at 25°C, BMS limits bypassed to provoke over-voltage."
+    t_amb_c: 25.0
+
+    profile:
+      type: constant_current
+      direction: charge        # şarj
+      current_a: 160.0         # ~0.5C
+      use_bms_limits: false    # BMS akım limitlerini BYPASS ediyoruz -> OV fault'u zorla
+
+    stop_conditions:
+      max_time_s: 600.0        # 10 dakika simülasyon süresi yeter
+      stop_on_emergency: true
