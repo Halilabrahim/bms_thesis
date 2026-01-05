@@ -50,14 +50,31 @@ def compute_current_limits(
     params: BMSControlParams,
 ) -> Dict[str, float]:
     """
-    Compute allowable charge and discharge currents based on
+    Compute allowable charge and discharge current magnitudes based on
     SoC, temperature and cell voltages.
 
-    Returns
-    -------
-    dict with:
-      - i_charge_max_allowed (negative direction)
-      - i_discharge_max_allowed (positive direction)
+    Notes
+    -----
+    - The returned limits are **magnitudes** (positive numbers). Sign handling is
+      the responsibility of the caller.
+    - In addition to the limits, the function also returns debug scalars that are
+      convenient for SCADA/UI display (scales and a "dominant limiter" code).
+
+    Dominant limiter codes (float)
+    ------------------------------
+    0   : NONE (no derate)
+    10  : TEMP_LOW_CUTOFF
+    11  : TEMP_LOW_DERATE
+    20  : TEMP_HIGH_CUTOFF
+    21  : TEMP_HIGH_DERATE
+    30  : VMIN_LIMIT (discharge)
+    31  : VMIN_MARGIN (discharge)
+    40  : VMAX_LIMIT (charge)
+    41  : VMAX_MARGIN (charge)
+    50  : SOC_LOW_CUTOFF (discharge)
+    51  : SOC_LOW_DERATE (discharge)
+    60  : SOC_HIGH_CUTOFF (charge)
+    61  : SOC_HIGH_DERATE (charge)
     """
     # --- 1) Start from rated limits ---
     i_chg = params.i_charge_max_a
@@ -117,7 +134,57 @@ def compute_current_limits(
         params.v_margin_v,
     )
 
-    # ---------- Combine scales ----------
+    def _dominant_discharge_code() -> float:
+        # Cutoffs first
+        if dis_soc_scale <= 0.0:
+            return 50.0
+        if t_low_scale <= 0.0:
+            return 10.0
+        if t_high_scale <= 0.0:
+            return 20.0
+        if dis_v_scale <= 0.0:
+            return 30.0
+
+        m = min(dis_soc_scale, t_low_scale, t_high_scale, dis_v_scale)
+        if m >= 0.999999:
+            return 0.0
+
+        # Deterministic tie-break: voltage -> SoC -> temp low -> temp high
+        tol = 1e-9
+        if dis_v_scale <= m + tol:
+            return 31.0
+        if dis_soc_scale <= m + tol:
+            return 51.0
+        if t_low_scale <= m + tol:
+            return 11.0
+        return 21.0
+
+    def _dominant_charge_code() -> float:
+        # Cutoffs first
+        if chg_soc_scale <= 0.0:
+            return 60.0
+        if t_low_scale <= 0.0:
+            return 10.0
+        if t_high_scale <= 0.0:
+            return 20.0
+        if chg_v_scale <= 0.0:
+            return 40.0
+
+        m = min(chg_soc_scale, t_low_scale, t_high_scale, chg_v_scale)
+        if m >= 0.999999:
+            return 0.0
+
+        # Deterministic tie-break: voltage -> SoC -> temp low -> temp high
+        tol = 1e-9
+        if chg_v_scale <= m + tol:
+            return 41.0
+        if chg_soc_scale <= m + tol:
+            return 61.0
+        if t_low_scale <= m + tol:
+            return 11.0
+        return 21.0
+
+    # ---------- Combine scales (product) ----------
     dis_scale = dis_soc_scale * temp_scale * dis_v_scale
     chg_scale = chg_soc_scale * temp_scale * chg_v_scale
 
@@ -125,6 +192,19 @@ def compute_current_limits(
     i_chg_allowed = i_chg * chg_scale
 
     return {
-        "i_discharge_max_allowed": i_dis_allowed,
-        "i_charge_max_allowed": i_chg_allowed,
+        # main outputs
+        "i_discharge_max_allowed": float(i_dis_allowed),
+        "i_charge_max_allowed": float(i_chg_allowed),
+
+        # debug scalars for UI
+        "scale_dis_total": float(dis_scale),
+        "scale_chg_total": float(chg_scale),
+        "scale_soc_dis": float(dis_soc_scale),
+        "scale_soc_chg": float(chg_soc_scale),
+        "scale_t_low": float(t_low_scale),
+        "scale_t_high": float(t_high_scale),
+        "scale_v_dis": float(dis_v_scale),
+        "scale_v_chg": float(chg_v_scale),
+        "code_limit_dis": float(_dominant_discharge_code()),
+        "code_limit_chg": float(_dominant_charge_code()),
     }

@@ -6,7 +6,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,7 +16,7 @@ from src.sim_runner import build_models
 from src.fsm import BMSState
 from src.bms_logic import compute_current_limits
 
-UI_BUILD = "2025-12-31_scada_ux_v1"
+UI_BUILD = "2026-01-05_scada_fix_used_signals_v4"
 
 
 STATE_CODE_MAP = {
@@ -26,6 +26,30 @@ STATE_CODE_MAP = {
     BMSState.EMERGENCY_SHUTDOWN: 3,
 }
 STATE_NAME_MAP = {v: k.name for k, v in STATE_CODE_MAP.items()}
+
+LIMIT_CODE_TEXT = {
+    0: "NONE",
+    10: "TEMP_LOW_CUTOFF",
+    11: "TEMP_LOW_DERATE",
+    20: "TEMP_HIGH_CUTOFF",
+    21: "TEMP_HIGH_DERATE",
+    30: "VMIN_MARGIN",
+    31: "VMIN_LIMIT",
+    40: "VMAX_MARGIN",
+    41: "VMAX_LIMIT",
+    50: "SOC_LOW_CUTOFF",
+    51: "SOC_LOW_DERATE",
+    60: "SOC_HIGH_CUTOFF",
+    61: "SOC_HIGH_DERATE",
+}
+
+
+def _lim_code_name(x: float) -> str:
+    try:
+        i = int(x)
+    except Exception:
+        return "N/A"
+    return LIMIT_CODE_TEXT.get(i, f"CODE_{i}")
 
 
 def _get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -57,6 +81,7 @@ def _resolve_path(p: str) -> str:
     except Exception:
         return str(p)
 
+
 def _as_float(x: Any, default: float = float("nan")) -> float:
     try:
         return float(x)
@@ -85,27 +110,33 @@ def _render_active_config_sidebar(params: Dict[str, Any], *, config_path: str, d
     soft_vmax = _as_float(limits.get("v_cell_max_v", float("nan")))
 
     ot_thr = _as_float(faults.get("ot_rack_c", float("nan")))
+    ut_thr = _as_float(faults.get("ut_rack_c", float("nan")))
+
     t_derate_start = _as_float(bms.get("t_high_derate_start_c", float("nan")))
     t_cutoff = _as_float(bms.get("t_high_cutoff_c", limits.get("t_max_c", float("nan"))))
+
+    t_low_derate = _as_float(bms.get("t_low_derate_start_c", float("nan")))
+    t_low_cutoff = _as_float(bms.get("t_low_cutoff_c", limits.get("t_min_c", float("nan"))))
 
     c_th = _as_float(thermal.get("c_th_j_per_k", float("nan")))
     r_th = _as_float(thermal.get("r_th_k_per_w", float("nan")))
     tau_s = float(c_th * r_th) if (np.isfinite(c_th) and np.isfinite(r_th)) else float("nan")
     tau_h = float(tau_s / 3600.0) if np.isfinite(tau_s) else float("nan")
 
-    # Quick trigger suggestions (pragmatic defaults)
     oc_dis = _as_float(faults.get("oc_discharge_a", float("nan")))
     oc_chg = _as_float(faults.get("oc_charge_a", float("nan")))
-    fire_temp = _as_float(faults.get("fire_temp_c", _get(params, "fire_detection", "temp_threshold_c", default=float("nan"))))
+    fire_temp = _as_float(
+        faults.get("fire_temp_c", _get(params, "fire_detection", "temp_threshold_c", default=float("nan")))
+    )
 
     rec_uv = (uv_thr - 0.05) if np.isfinite(uv_thr) else float("nan")
     rec_ov = (ov_thr + 0.02) if np.isfinite(ov_thr) else float("nan")
     rec_ot = (ot_thr + 5.0) if np.isfinite(ot_thr) else float("nan")
+    rec_ut = (ut_thr - 5.0) if np.isfinite(ut_thr) else float("nan")
     rec_oc_dis = (oc_dis + 50.0) if np.isfinite(oc_dis) else float("nan")
     rec_oc_chg = (oc_chg + 50.0) if np.isfinite(oc_chg) else float("nan")
     rec_fire_t = (fire_temp + 1.0) if np.isfinite(fire_temp) else float("nan")
 
-    # Extra (optional) spec section (from params_rack.yaml)
     chemistry = _get(params, "chemistry", default={}) or {}
     structure = _get(params, "structure", default={}) or {}
     pack = _get(params, "pack", default={}) or {}
@@ -126,18 +157,29 @@ def _render_active_config_sidebar(params: Dict[str, Any], *, config_path: str, d
             st.write(f"OV threshold: {ov_thr:.2f} V")
         if np.isfinite(soft_vmax):
             st.write(f"Soft max cell voltage: {soft_vmax:.2f} V")
+
         if np.isfinite(ot_thr):
             st.write(f"OT threshold: {ot_thr:.1f} °C")
+        if np.isfinite(ut_thr):
+            st.write(f"UT threshold: {ut_thr:.1f} °C")
+
+        if np.isfinite(t_low_derate):
+            st.write(f"T low derate start: {t_low_derate:.1f} °C")
+        if np.isfinite(t_low_cutoff):
+            st.write(f"T low cutoff: {t_low_cutoff:.1f} °C")
+
         if np.isfinite(t_derate_start):
-            st.write(f"T derate start: {t_derate_start:.1f} °C")
+            st.write(f"T high derate start: {t_derate_start:.1f} °C")
         if np.isfinite(t_cutoff):
-            st.write(f"T cutoff: {t_cutoff:.1f} °C")
+            st.write(f"T high cutoff: {t_cutoff:.1f} °C")
 
         if np.isfinite(tau_s):
             st.write(f"Thermal time constant estimate: τ ≈ {tau_s:.0f} s (~{tau_h:.1f} h).")
-            st.caption("So changing T_amb in later segments may not raise T_rack quickly. Use T_rack override or OT injection for fast logic tests.")
+            st.caption(
+                "So changing T_amb in later segments may not raise T_rack quickly. "
+                "Use T_rack override / injections for fast logic tests."
+            )
 
-        # meta section (offline ile aynı mantık)
         sys_name = str(meta.get("system_name", "")).strip()
         ver = str(meta.get("version", "")).strip()
         if sys_name or ver:
@@ -148,7 +190,6 @@ def _render_active_config_sidebar(params: Dict[str, Any], *, config_path: str, d
             if ver:
                 st.write(f'version: "{ver}"')
 
-        # Useful specs (params_rack.yaml’dan)
         st.divider()
         with st.expander("Rack / pack key specs", expanded=True):
             ch_name = str(chemistry.get("name", "")).strip()
@@ -189,83 +230,93 @@ def _render_active_config_sidebar(params: Dict[str, Any], *, config_path: str, d
             if np.isfinite(hi):
                 st.write(f"rated current per rack: {hi:.1f} A")
 
-        # Fault quick ref (fault tetiklemek için)
         st.divider()
         st.caption("Fault quick reference (for fast triggering)")
         rows = []
         if np.isfinite(uv_thr):
-            rows.append({
-                "Fault": "UV",
-                "Threshold": f"{uv_thr:.2f} V",
-                "Quick trigger": f"Override v_cell_min ≈ {rec_uv:.2f} V",
-                "Best knob": "Manual override v_cell_min OR UV injection",
-            })
+            rows.append(
+                {
+                    "Fault": "UV",
+                    "Threshold": f"{uv_thr:.2f} V",
+                    "Quick trigger": f"Override v_cell_min ≈ {rec_uv:.2f} V",
+                    "Best knob": "Manual override v_cell_min OR UV injection",
+                }
+            )
         if np.isfinite(ov_thr):
-            rows.append({
-                "Fault": "OV",
-                "Threshold": f"{ov_thr:.2f} V",
-                "Quick trigger": f"Override v_cell_max ≈ {rec_ov:.2f} V",
-                "Best knob": "Manual override v_cell_max",
-            })
+            rows.append(
+                {
+                    "Fault": "OV",
+                    "Threshold": f"{ov_thr:.2f} V",
+                    "Quick trigger": f"Override v_cell_max ≈ {rec_ov:.2f} V",
+                    "Best knob": "Manual override v_cell_max",
+                }
+            )
         if np.isfinite(ot_thr):
-            rows.append({
-                "Fault": "OT",
-                "Threshold": f"{ot_thr:.1f} °C",
-                "Quick trigger": f"Override t_rack ≈ {rec_ot:.1f} °C",
-                "Best knob": "Manual override t_rack OR OT injection",
-            })
+            rows.append(
+                {
+                    "Fault": "OT",
+                    "Threshold": f"{ot_thr:.1f} °C",
+                    "Quick trigger": f"Override t_rack_used ≈ {rec_ot:.1f} °C",
+                    "Best knob": "Manual override t_rack OR OT injection",
+                }
+            )
+        if np.isfinite(ut_thr):
+            rows.append(
+                {
+                    "Fault": "UT",
+                    "Threshold": f"{ut_thr:.1f} °C",
+                    "Quick trigger": f"Override t_rack_used ≈ {rec_ut:.1f} °C",
+                    "Best knob": "Manual override t_rack OR UT injection",
+                }
+            )
         if np.isfinite(oc_dis) or np.isfinite(oc_chg):
             thr = []
             if np.isfinite(oc_dis):
                 thr.append(f"dis>{oc_dis:.0f}A")
             if np.isfinite(oc_chg):
                 thr.append(f"chg>{oc_chg:.0f}A")
-            rows.append({
-                "Fault": "OC",
-                "Threshold": ", ".join(thr),
-                "Quick trigger": f"Override i_rack ≈ {rec_oc_dis:.0f}A (dis) / {rec_oc_chg:.0f}A (chg)",
-                "Best knob": "Manual override i_rack OR OC injection",
-            })
-        rows.append({
-            "Fault": "FIRE",
-            "Threshold": "gas_alarm=True",
-            "Quick trigger": f"Enable FIRE injection (or gas_alarm override). Temp ref: {rec_fire_t:.1f}°C",
-            "Best knob": "FIRE injection OR gas_alarm override",
-        })
-
+            rows.append(
+                {
+                    "Fault": "OC",
+                    "Threshold": ", ".join(thr),
+                    "Quick trigger": f"Override i_rack ≈ {rec_oc_dis:.0f}A (dis) / {rec_oc_chg:.0f}A (chg)",
+                    "Best knob": "Manual override i_rack OR OC injection",
+                }
+            )
+        rows.append(
+            {
+                "Fault": "FIRE",
+                "Threshold": "gas_alarm=True",
+                "Quick trigger": f"Enable FIRE injection (or gas_alarm override). Temp ref: {rec_fire_t:.1f}°C",
+                "Best knob": "FIRE injection OR gas_alarm override",
+            }
+        )
         st.dataframe(rows, use_container_width=True, hide_index=True)
+
 
 def _ensure_event_log(maxlen: int = 200) -> None:
     if "scada_event_log" not in st.session_state:
         st.session_state.scada_event_log = deque(maxlen=maxlen)
     if "scada_prev_flags" not in st.session_state:
-        st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "fire": 0}
+        st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "ut": 0, "fire": 0}
     if "scada_prev_state_code" not in st.session_state:
         st.session_state.scada_prev_state_code = None
 
 
 def _event_add(t_s: float, severity: str, kind: str, message: str) -> None:
     _ensure_event_log()
-    st.session_state.scada_event_log.appendleft(
-        {"t_s": float(t_s), "severity": severity, "type": kind, "message": message}
-    )
+    st.session_state.scada_event_log.appendleft({"t_s": float(t_s), "severity": severity, "type": kind, "message": message})
 
 
 def _severity_for_fault(fault: str) -> str:
-    # Thesis-friendly default mapping (can be refined later)
     if fault in ("fire", "ot", "ov", "uv"):
         return "CRITICAL"
-    if fault == "oc":
+    if fault in ("ut", "oc"):
         return "WARNING"
     return "INFO"
 
 
 def _update_events_from_step(step_out: Dict[str, float]) -> None:
-    """
-    Edge-based event logging:
-    - fault asserted / cleared
-    - state transitions
-    """
     _ensure_event_log()
     t_s = float(step_out.get("t_s", np.nan))
 
@@ -274,25 +325,16 @@ def _update_events_from_step(step_out: Dict[str, float]) -> None:
         "ov": int(step_out.get("ov", 0.0) > 0.5),
         "uv": int(step_out.get("uv", 0.0) > 0.5),
         "ot": int(step_out.get("ot", 0.0) > 0.5),
+        "ut": int(step_out.get("ut", 0.0) > 0.5),
         "fire": int(step_out.get("fire", 0.0) > 0.5),
     }
     prev_flags = dict(st.session_state.scada_prev_flags)
 
-    for k in ("oc", "ov", "uv", "ot", "fire"):
+    for k in ("oc", "ov", "uv", "ot", "ut", "fire"):
         if prev_flags.get(k, 0) == 0 and cur_flags[k] == 1:
-            _event_add(
-                t_s=t_s,
-                severity=_severity_for_fault(k),
-                kind="FAULT_ASSERT",
-                message=f"{k.upper()} asserted",
-            )
+            _event_add(t_s=t_s, severity=_severity_for_fault(k), kind="FAULT_ASSERT", message=f"{k.upper()} asserted")
         if prev_flags.get(k, 0) == 1 and cur_flags[k] == 0:
-            _event_add(
-                t_s=t_s,
-                severity="INFO",
-                kind="FAULT_CLEAR",
-                message=f"{k.upper()} cleared",
-            )
+            _event_add(t_s=t_s, severity="INFO", kind="FAULT_CLEAR", message=f"{k.upper()} cleared")
 
     cur_state_code = int(step_out.get("state_code", -999))
     prev_state_code = st.session_state.scada_prev_state_code
@@ -318,6 +360,7 @@ def _update_events_from_step(step_out: Dict[str, float]) -> None:
 class LiveInjections:
     uv: bool = False
     ot: bool = False
+    ut: bool = False
     oc: bool = False
     fire: bool = False
 
@@ -340,6 +383,20 @@ class LiveProfile:
 
 
 class LiveBmsSim:
+    """
+    Live SCADA simulator.
+
+    IMPORTANT:
+    - "true" signals are from the plant models (ECM + thermal)
+    - "used" signals are the ones the BMS sees after manual overrides / injections
+    Derating (compute_current_limits) and fault detection both use the USED signals.
+
+    Key visibility signals:
+    - I_req: operator/profile request
+    - I_act: applied current after BMS limits
+    - I_used: BMS perceived current (measurement layer after overrides/injections)
+    """
+
     def __init__(
         self,
         params: Dict[str, Any],
@@ -356,6 +413,7 @@ class LiveBmsSim:
         profile: Optional[LiveProfile] = None,
         uv_v_fault: float = 2.5,
         ot_temp_c: float = 65.0,
+        ut_temp_c: float = -30.0,
         oc_i_fault_a: float = 500.0,
         history_max_points: int = 30000,
     ) -> None:
@@ -399,6 +457,7 @@ class LiveBmsSim:
         self.ovr = ManualOverrides()
         self.uv_v_fault = float(uv_v_fault)
         self.ot_temp_c = float(ot_temp_c)
+        self.ut_temp_c = float(ut_temp_c)
         self.oc_i_fault_a = float(oc_i_fault_a)
 
         self.time_s = 0.0
@@ -414,23 +473,32 @@ class LiveBmsSim:
             "time_s",
             "i_req_a",
             "i_act_a",
+            "i_rack_used_a",        # BMS perceived current
             "soc_true",
             "soc_hat",
-            "v_cell_min_v",
-            "v_cell_max_v",
-            "t_rack_c",
+            "v_cell_min_true_v",
+            "v_cell_max_true_v",
+            "v_cell_min_v",          # used
+            "v_cell_max_v",          # used
+            "t_rack_true_c",
+            "t_rack_used_c",
             "t_amb_c",
             "state_code",
             "oc",
             "ov",
             "uv",
             "ot",
+            "ut",
             "fire",
             "i_discharge_lim_a",
             "i_charge_lim_a",
             "soc_cell_min",
             "soc_cell_mean",
             "soc_cell_max",
+            "lim_code_dis",
+            "lim_code_chg",
+            "scale_dis_total",
+            "scale_chg_total",
         ]
         self.hist = {k: deque(maxlen=self.history_max_points) for k in keys}
 
@@ -450,9 +518,22 @@ class LiveBmsSim:
             return float(x)
         return float(x + self.rng_meas.normal(0.0, sigma))
 
+    # ---------------- FIX #2: robust mode switching ----------------
     def set_profile_mode(self, mode: str) -> None:
         mode = str(mode).strip().lower()
-        self.profile.mode = "setpoint" if mode == "setpoint" else "random"
+        new_mode = "setpoint" if mode == "setpoint" else "random"
+
+        if new_mode == self.profile.mode:
+            return
+
+        self.profile.mode = new_mode
+
+        if new_mode == "random":
+            # Immediately arm a random segment after switching from setpoint.
+            self._choose_new_request_random()
+        else:
+            # Stop random scheduling in setpoint mode
+            self.next_switch_s = float("inf")
 
     def set_setpoint_a(self, val: float) -> None:
         self.profile.i_setpoint_a = float(val)
@@ -483,6 +564,65 @@ class LiveBmsSim:
         else:
             self.i_req_a += float(np.sign(delta) * max_step)
 
+    def _apply_bms_visibility_layer(
+        self,
+        *,
+        v_cell_min_true_v: float,
+        v_cell_max_true_v: float,
+        t_rack_true_c: float,
+        i_rack_meas_a: float,
+        gas_alarm: bool,
+    ) -> Tuple[float, float, float, float, bool]:
+        vmin_used = float(v_cell_min_true_v)
+        vmax_used = float(v_cell_max_true_v)
+        t_used = float(t_rack_true_c)
+        i_used = float(i_rack_meas_a)
+        gas_used = bool(gas_alarm)
+
+        # PRIORITY:
+        #   BASE -> MANUAL OVERRIDES -> INJECTIONS (injection wins on conflicts)
+
+        # manual overrides (lower priority)
+        if self.ovr.enabled:
+            if self.ovr.v_cell_min_override_v is not None:
+                vmin_used = float(self.ovr.v_cell_min_override_v)
+            if self.ovr.v_cell_max_override_v is not None:
+                vmax_used = float(self.ovr.v_cell_max_override_v)
+            if self.ovr.t_rack_override_c is not None:
+                t_used = float(self.ovr.t_rack_override_c)
+            if self.ovr.i_rack_override_a is not None:
+                i_used = float(self.ovr.i_rack_override_a)
+            if self.ovr.gas_alarm_override is not None:
+                gas_used = bool(self.ovr.gas_alarm_override)
+
+        # injections (highest priority)
+        if self.inj.uv:
+            vmin_used = min(vmin_used, float(self.uv_v_fault))
+        if self.inj.ot:
+            t_used = max(t_used, float(self.ot_temp_c))
+        if self.inj.ut:
+            t_used = min(t_used, float(self.ut_temp_c))
+
+        # ---------------- FIX #1: OC injection sign follows I_req (deterministic) ----------------
+        if self.inj.oc:
+            # Direction follows operator request (I_req). If I_req is ~0, default to discharge (+).
+            if self.i_req_a > 1e-9:
+                sgn = 1.0
+            elif self.i_req_a < -1e-9:
+                sgn = -1.0
+            else:
+                sgn = 1.0
+            i_used = float(sgn * abs(self.oc_i_fault_a))
+
+        if self.inj.fire:
+            gas_used = True
+
+        # optional temp sensor noise (only for "used" measurement, not plant)
+        if np.isfinite(self.sigma_t) and self.sigma_t > 0.0:
+            t_used = self._meas(t_used, float(self.sigma_t))
+
+        return vmin_used, vmax_used, t_used, i_used, gas_used
+
     def reset(self) -> None:
         self.time_s = 0.0
         self.ecm.reset(soc=self.true_init_soc)
@@ -490,6 +630,7 @@ class LiveBmsSim:
         self.ekf.reset(soc_init=self.ekf_init_soc)
         self.fault_det.reset()
         self.fsm.reset(BMSState.RUN)
+
         self.last_res = self.ecm.step(0.0, 0.0)
 
         if self.profile.mode == "random":
@@ -499,19 +640,34 @@ class LiveBmsSim:
             self.next_switch_s = float("inf")
 
         self._init_hist()
-        vmin = float(self.last_res.get("v_cell_min", np.nan))
-        vmax = float(self.last_res.get("v_cell_max", np.nan))
+
+        vmin_true = float(self.last_res.get("v_cell_min", np.nan))
+        vmax_true = float(self.last_res.get("v_cell_max", np.nan))
+        t_true = float(self.thermal.t_c)
+
+        vmin_used, vmax_used, t_used, i_used, _ = self._apply_bms_visibility_layer(
+            v_cell_min_true_v=vmin_true,
+            v_cell_max_true_v=vmax_true,
+            t_rack_true_c=t_true,
+            i_rack_meas_a=0.0,
+            gas_alarm=False,
+        )
+
         self._log_sample(
             t_s=0.0,
             i_req=0.0,
             i_act=0.0,
+            i_used=i_used,
             res=self.last_res,
-            v_cell_min_used=vmin,
-            v_cell_max_used=vmax,
-            t_rack=float(self.thermal.t_c),
+            v_cell_min_true_v=vmin_true,
+            v_cell_max_true_v=vmax_true,
+            v_cell_min_used_v=vmin_used,
+            v_cell_max_used_v=vmax_used,
+            t_rack_true_c=t_true,
+            t_rack_used_c=t_used,
             t_amb=float(self.t_amb_c),
             state=self.fsm.state,
-            flags={"oc": False, "ov": False, "uv": False, "ot": False, "fire": False},
+            flags={"oc": False, "ov": False, "uv": False, "ot": False, "ut": False, "fire": False},
             curr_limits=None,
         )
 
@@ -521,10 +677,14 @@ class LiveBmsSim:
         t_s: float,
         i_req: float,
         i_act: float,
+        i_used: float,
         res: Dict[str, Any],
-        v_cell_min_used: float,
-        v_cell_max_used: float,
-        t_rack: float,
+        v_cell_min_true_v: float,
+        v_cell_max_true_v: float,
+        v_cell_min_used_v: float,
+        v_cell_max_used_v: float,
+        t_rack_true_c: float,
+        t_rack_used_c: float,
         t_amb: float,
         state: BMSState,
         flags: Dict[str, Any],
@@ -536,13 +696,18 @@ class LiveBmsSim:
         self.hist["time_s"].append(float(t_s))
         self.hist["i_req_a"].append(float(i_req))
         self.hist["i_act_a"].append(float(i_act))
+        self.hist["i_rack_used_a"].append(float(i_used))
+
         self.hist["soc_true"].append(soc_true)
         self.hist["soc_hat"].append(soc_hat)
 
-        self.hist["v_cell_min_v"].append(float(v_cell_min_used))
-        self.hist["v_cell_max_v"].append(float(v_cell_max_used))
+        self.hist["v_cell_min_true_v"].append(float(v_cell_min_true_v))
+        self.hist["v_cell_max_true_v"].append(float(v_cell_max_true_v))
+        self.hist["v_cell_min_v"].append(float(v_cell_min_used_v))
+        self.hist["v_cell_max_v"].append(float(v_cell_max_used_v))
 
-        self.hist["t_rack_c"].append(float(t_rack))
+        self.hist["t_rack_true_c"].append(float(t_rack_true_c))
+        self.hist["t_rack_used_c"].append(float(t_rack_used_c))
         self.hist["t_amb_c"].append(float(t_amb))
 
         self.hist["state_code"].append(float(STATE_CODE_MAP[state]))
@@ -551,15 +716,33 @@ class LiveBmsSim:
         self.hist["ov"].append(float(bool(flags.get("ov", False))))
         self.hist["uv"].append(float(bool(flags.get("uv", False))))
         self.hist["ot"].append(float(bool(flags.get("ot", False))))
+        self.hist["ut"].append(float(bool(flags.get("ut", False))))
         self.hist["fire"].append(float(bool(flags.get("fire", False))))
 
+        # --- current limits + limiter reason (robust) ---
         if curr_limits is None:
-            self.hist["i_discharge_lim_a"].append(np.nan)
-            self.hist["i_charge_lim_a"].append(np.nan)
+            i_dis = np.nan
+            i_chg = np.nan
+            code_dis = np.nan
+            code_chg = np.nan
+            scale_dis = np.nan
+            scale_chg = np.nan
         else:
-            self.hist["i_discharge_lim_a"].append(float(curr_limits.get("i_discharge_max_allowed", np.nan)))
-            self.hist["i_charge_lim_a"].append(float(curr_limits.get("i_charge_max_allowed", np.nan)))
+            i_dis = float(curr_limits.get("i_discharge_max_allowed", np.nan))
+            i_chg = float(curr_limits.get("i_charge_max_allowed", np.nan))
+            code_dis = float(curr_limits.get("code_limit_dis", np.nan))
+            code_chg = float(curr_limits.get("code_limit_chg", np.nan))
+            scale_dis = float(curr_limits.get("scale_dis_total", np.nan))
+            scale_chg = float(curr_limits.get("scale_chg_total", np.nan))
 
+        self.hist["i_discharge_lim_a"].append(i_dis)
+        self.hist["i_charge_lim_a"].append(i_chg)
+        self.hist["lim_code_dis"].append(code_dis)
+        self.hist["lim_code_chg"].append(code_chg)
+        self.hist["scale_dis_total"].append(scale_dis)
+        self.hist["scale_chg_total"].append(scale_chg)
+
+        # --- cell SoC stats ---
         self.hist["soc_cell_min"].append(float(res.get("soc_cell_min", soc_true)))
         self.hist["soc_cell_mean"].append(float(res.get("soc_cell_mean", soc_true)))
         self.hist["soc_cell_max"].append(float(res.get("soc_cell_max", soc_true)))
@@ -571,16 +754,32 @@ class LiveBmsSim:
         else:
             self._update_i_req_setpoint()
 
+        if self.last_res is None:
+            self.last_res = self.ecm.step(0.0, 0.0)
+
+        vmin_true_prev = float(self.last_res.get("v_cell_min", np.nan))
+        vmax_true_prev = float(self.last_res.get("v_cell_max", np.nan))
+        t_true_prev = float(self.thermal.t_c)
+
+        vmin_used_prev, vmax_used_prev, t_used_prev, _, _ = self._apply_bms_visibility_layer(
+            v_cell_min_true_v=vmin_true_prev,
+            v_cell_max_true_v=vmax_true_prev,
+            t_rack_true_c=t_true_prev,
+            i_rack_meas_a=0.0,
+            gas_alarm=False,
+        )
+
         curr_limits: Optional[Dict[str, float]] = None
+
         if self.fsm.state in (BMSState.FAULT, BMSState.EMERGENCY_SHUTDOWN):
             i_act = 0.0
         else:
-            if self.use_bms_limits and self.last_res is not None:
+            if self.use_bms_limits:
                 curr_limits = compute_current_limits(
                     soc_hat=float(self.ekf.get_soc()),
-                    t_rack_c=float(self.thermal.t_c),
-                    v_cell_min=float(self.last_res.get("v_cell_min", np.nan)),
-                    v_cell_max=float(self.last_res.get("v_cell_max", np.nan)),
+                    t_rack_c=float(t_used_prev),
+                    v_cell_min=float(vmin_used_prev),
+                    v_cell_max=float(vmax_used_prev),
                     params=self.bms_params,
                 )
                 if self.i_req_a >= 0.0:
@@ -595,45 +794,29 @@ class LiveBmsSim:
         res = self.ecm.step(i_act, self.dt_s)
         self.last_res = res
 
-        t_rack = float(self.thermal.step(float(res["p_loss"]), float(self.t_amb_c), float(self.dt_s)))
+        t_true = float(self.thermal.step(float(res["p_loss"]), float(self.t_amb_c), float(self.dt_s)))
 
         v_meas = self._meas(float(res["v_rack"]), self.sigma_v)
         i_meas = self._meas(float(i_act), self.sigma_i)
         self.ekf.update(v_meas, i_meas)
 
-        v_cell_min_used = float(res.get("v_cell_min", np.nan))
-        v_cell_max_used = float(res.get("v_cell_max", np.nan))
-        t_for_fault = float(t_rack)
-        i_for_fault = float(i_meas)
-        gas_alarm = False
+        vmin_true = float(res.get("v_cell_min", np.nan))
+        vmax_true = float(res.get("v_cell_max", np.nan))
 
-        if self.inj.uv:
-            v_cell_min_used = min(v_cell_min_used, float(self.uv_v_fault))
-        if self.inj.ot:
-            t_for_fault = max(t_for_fault, float(self.ot_temp_c))
-        if self.inj.oc:
-            i_for_fault = float(self.oc_i_fault_a) if i_for_fault >= 0 else -float(self.oc_i_fault_a)
-        if self.inj.fire:
-            gas_alarm = True
-
-        if self.ovr.enabled:
-            if self.ovr.v_cell_min_override_v is not None:
-                v_cell_min_used = float(self.ovr.v_cell_min_override_v)
-            if self.ovr.v_cell_max_override_v is not None:
-                v_cell_max_used = float(self.ovr.v_cell_max_override_v)
-            if self.ovr.t_rack_override_c is not None:
-                t_for_fault = float(self.ovr.t_rack_override_c)
-            if self.ovr.i_rack_override_a is not None:
-                i_for_fault = float(self.ovr.i_rack_override_a)
-            if self.ovr.gas_alarm_override is not None:
-                gas_alarm = bool(self.ovr.gas_alarm_override)
+        vmin_used, vmax_used, t_used, i_used, gas_used = self._apply_bms_visibility_layer(
+            v_cell_min_true_v=vmin_true,
+            v_cell_max_true_v=vmax_true,
+            t_rack_true_c=t_true,
+            i_rack_meas_a=float(i_meas),
+            gas_alarm=False,
+        )
 
         flags = self.fault_det.step(
-            v_cell_min=v_cell_min_used,
-            v_cell_max=v_cell_max_used,
-            t_rack_c=t_for_fault,
-            i_rack_a=i_for_fault,
-            gas_alarm=gas_alarm,
+            v_cell_min=vmin_used,
+            v_cell_max=vmax_used,
+            t_rack_c=t_used,
+            i_rack_a=i_used,
+            gas_alarm=gas_used,
         )
         state = self.fsm.step(flags, enable=True)
 
@@ -642,10 +825,14 @@ class LiveBmsSim:
             t_s=self.time_s,
             i_req=self.i_req_a,
             i_act=i_act,
+            i_used=i_used,
             res=res,
-            v_cell_min_used=v_cell_min_used,
-            v_cell_max_used=v_cell_max_used,
-            t_rack=t_rack,
+            v_cell_min_true_v=vmin_true,
+            v_cell_max_true_v=vmax_true,
+            v_cell_min_used_v=vmin_used,
+            v_cell_max_used_v=vmax_used,
+            t_rack_true_c=t_true,
+            t_rack_used_c=t_used,
             t_amb=float(self.t_amb_c),
             state=state,
             flags=flags,
@@ -656,22 +843,71 @@ class LiveBmsSim:
             "t_s": float(self.time_s),
             "i_req_a": float(self.i_req_a),
             "i_act_a": float(i_act),
+            "i_rack_used_a": float(i_used),
             "soc_true": float(res.get("soc", np.nan)),
             "soc_hat": float(self.ekf.get_soc()),
-            "v_cell_min_v": float(v_cell_min_used),
-            "v_cell_max_v": float(v_cell_max_used),
-            "t_rack_c": float(t_rack),
+            "v_cell_min_true_v": float(vmin_true),
+            "v_cell_max_true_v": float(vmax_true),
+            "v_cell_min_v": float(vmin_used),
+            "v_cell_max_v": float(vmax_used),
+            "t_rack_true_c": float(t_true),
+            "t_rack_used_c": float(t_used),
             "t_amb_c": float(self.t_amb_c),
             "state_code": float(STATE_CODE_MAP[state]),
             "oc": float(bool(flags.get("oc", False))),
             "ov": float(bool(flags.get("ov", False))),
             "uv": float(bool(flags.get("uv", False))),
             "ot": float(bool(flags.get("ot", False))),
+            "ut": float(bool(flags.get("ut", False))),
             "fire": float(bool(flags.get("fire", False))),
         }
 
     def to_npz(self) -> Dict[str, np.ndarray]:
         return {k: np.asarray(list(v), dtype=float) for k, v in self.hist.items()}
+
+
+def _compute_inhibit_banner(params: Dict[str, Any], *, t_used_c: float, limits_row: Dict[str, float]) -> Tuple[Optional[str], Optional[str]]:
+    if not np.isfinite(t_used_c):
+        return None, None
+
+    bms = _get(params, "bms_control", default={}) or {}
+    limits = _get(params, "limits", default={}) or {}
+
+    t_low_cutoff = _as_float(bms.get("t_low_cutoff_c", limits.get("t_min_c", np.nan)))
+    t_low_derate = _as_float(bms.get("t_low_derate_start_c", np.nan))
+    t_high_derate = _as_float(bms.get("t_high_derate_start_c", np.nan))
+    t_high_cutoff = _as_float(bms.get("t_high_cutoff_c", limits.get("t_max_c", np.nan)))
+
+    i_dis = float(limits_row.get("i_discharge_max_allowed", np.nan))
+    i_chg = float(limits_row.get("i_charge_max_allowed", np.nan))
+
+    if np.isfinite(i_dis) and np.isfinite(i_chg) and (i_dis <= 1e-9) and (i_chg <= 1e-9):
+        if np.isfinite(t_low_cutoff) and t_used_c <= t_low_cutoff + 1e-9:
+            return "warning", (
+                f"Current limits are 0 because temperature is below/at low cutoff "
+                f"(T_used={t_used_c:.1f}°C ≤ T_low_cutoff={t_low_cutoff:.1f}°C). "
+                f"This is an operational inhibit (not necessarily a latched fault)."
+            )
+        if np.isfinite(t_high_cutoff) and t_used_c >= t_high_cutoff - 1e-9:
+            return "warning", (
+                f"Current limits are 0 because temperature is above/at high cutoff "
+                f"(T_used={t_used_c:.1f}°C ≥ T_high_cutoff={t_high_cutoff:.1f}°C). "
+                f"This is an operational inhibit (not necessarily a latched fault)."
+            )
+        return "info", "Current limits are 0 due to BMS limits (temperature / SoC / voltage). Check limits plots."
+
+    if np.isfinite(t_low_derate) and np.isfinite(t_low_cutoff) and (t_used_c < t_low_derate) and (t_used_c > t_low_cutoff):
+        return "info", (
+            f"Low-temperature derating region active "
+            f"(T_low_cutoff={t_low_cutoff:.1f}°C < T_used={t_used_c:.1f}°C < T_low_derate_start={t_low_derate:.1f}°C)."
+        )
+    if np.isfinite(t_high_derate) and np.isfinite(t_high_cutoff) and (t_used_c > t_high_derate) and (t_used_c < t_high_cutoff):
+        return "info", (
+            f"High-temperature derating region active "
+            f"(T_high_derate_start={t_high_derate:.1f}°C < T_used={t_used_c:.1f}°C < T_high_cutoff={t_high_cutoff:.1f}°C)."
+        )
+
+    return None, None
 
 
 def render_scada_playground(
@@ -687,7 +923,6 @@ def render_scada_playground(
     if not config_path_resolved:
         config_path_resolved = _resolve_path(config_path)
 
-    # Reset state if config changes
     if "scada_last_config" not in st.session_state:
         st.session_state.scada_last_config = config_path
     if st.session_state.scada_last_config != config_path:
@@ -695,7 +930,7 @@ def render_scada_playground(
         st.session_state.scada_running = False
         st.session_state.sync_autorun_toggle = True
         st.session_state.scada_event_log = deque(maxlen=200)
-        st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "fire": 0}
+        st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "ut": 0, "fire": 0}
         st.session_state.scada_prev_state_code = None
         if "scada_sim" in st.session_state:
             del st.session_state["scada_sim"]
@@ -707,16 +942,15 @@ def render_scada_playground(
 
     _render_active_config_sidebar(params, config_path=config_path, dt_s=safe_dt)
 
-    st.caption(
-        f"UI build: {UI_BUILD} | Config: {config_path} | Resolved: {config_path_resolved} | dt={safe_dt:g}s"
-    )
+    st.caption(f"UI build: {UI_BUILD} | Config: {config_path} | Resolved: {config_path_resolved} | dt={safe_dt:g}s")
 
     if "scada_running" not in st.session_state:
         st.session_state.scada_running = False
 
-    # -----------------------------
-    # Controls
-    # -----------------------------
+    # Auto-lock: operator intervention => setpoint
+    def _lock_to_setpoint() -> None:
+        st.session_state["sc_prof_mode"] = "setpoint"
+
     st.subheader("Controls")
     c1, c2, c3 = st.columns(3)
 
@@ -732,8 +966,8 @@ def render_scada_playground(
     with c2:
         st.markdown("**Profile**")
         profile_mode = st.selectbox("Profile mode", ["random", "setpoint"], index=0, key="sc_prof_mode")
-        i_set = st.number_input("Setpoint I_req [A]", value=0.0, step=10.0, key="sc_i_set")
-        ramp = st.number_input("Ramp [A/s] (0 = instant)", min_value=0.0, value=0.0, step=10.0, key="sc_ramp")
+        i_set = st.number_input("Setpoint I_req [A]", value=0.0, step=10.0, key="sc_i_set", on_change=_lock_to_setpoint)
+        ramp = st.number_input("Ramp [A/s] (0 = instant)", min_value=0.0, value=0.0, step=10.0, key="sc_ramp", on_change=_lock_to_setpoint)
 
         st.markdown("**Random profile ranges**")
         i_dis = st.number_input("Max discharge (random) [A]", value=300.0, step=10.0, key="sc_i_dis")
@@ -770,7 +1004,6 @@ def render_scada_playground(
         steps_per_tick = st.number_input("Steps per refresh", min_value=1, max_value=500, value=5, step=1, key="sc_steps_tick")
         refresh_ms = st.number_input("Refresh interval [ms]", min_value=50, max_value=5000, value=250, step=50, key="sc_refresh_ms")
 
-        # Auto-run toggle (widget key != scada_running)
         if "scada_autorun_toggle" not in st.session_state:
             st.session_state.scada_autorun_toggle = bool(st.session_state.get("scada_running", False))
         if st.session_state.get("sync_autorun_toggle", False):
@@ -780,68 +1013,69 @@ def render_scada_playground(
         st.toggle("Auto-run", key="scada_autorun_toggle")
         st.session_state.scada_running = bool(st.session_state.scada_autorun_toggle)
 
-    # -----------------------------
-    # Interventions
-    # -----------------------------
-    st.subheader("Interventions (BMS visibility)")
+    st.subheader("Interventions (BMS visibility layer)")
 
     with st.expander("Fault injections (force triggers)", expanded=False):
-        d1, d2, d3, d4 = st.columns([1.2, 1.2, 1.6, 1.0])
+        d1, d2, d3, d4, d5 = st.columns([1.2, 1.2, 1.2, 1.6, 1.0])
         with d1:
-            inj_uv = st.checkbox("UV injection", value=False, key="sc_inj_uv")
-            uv_v = st.number_input("UV: detector v_cell_min [V]", value=2.50, step=0.05, key="sc_uv_v")
+            inj_uv = st.checkbox("UV injection", value=False, key="sc_inj_uv", on_change=_lock_to_setpoint)
+            uv_v = st.number_input("UV: detector v_cell_min [V]", value=2.50, step=0.05, key="sc_uv_v", on_change=_lock_to_setpoint)
         with d2:
-            inj_ot = st.checkbox("OT injection", value=False, key="sc_inj_ot")
-            ot_c = st.number_input("OT: detector t_rack [°C]", value=65.0, step=1.0, key="sc_ot_c")
+            inj_ot = st.checkbox("OT injection", value=False, key="sc_inj_ot", on_change=_lock_to_setpoint)
+            ot_c = st.number_input("OT: detector T_used [°C]", value=65.0, step=1.0, key="sc_ot_c", on_change=_lock_to_setpoint)
         with d3:
-            inj_oc = st.checkbox("OC injection", value=False, key="sc_inj_oc")
-            oc_a = st.number_input("OC: detector i_rack [A]", value=500.0, step=50.0, key="sc_oc_a")
+            inj_ut = st.checkbox("UT injection", value=False, key="sc_inj_ut", on_change=_lock_to_setpoint)
+            ut_c = st.number_input("UT: detector T_used [°C]", value=-30.0, step=1.0, key="sc_ut_c", on_change=_lock_to_setpoint)
         with d4:
-            inj_fire = st.checkbox("FIRE (gas alarm)", value=False, key="sc_inj_fire")
+            inj_oc = st.checkbox("OC injection", value=False, key="sc_inj_oc", on_change=_lock_to_setpoint)
+            oc_a = st.number_input("OC: detector i_rack [A]", value=500.0, step=50.0, key="sc_oc_a", on_change=_lock_to_setpoint)
+        with d5:
+            inj_fire = st.checkbox("FIRE (gas alarm)", value=False, key="sc_inj_fire", on_change=_lock_to_setpoint)
 
-    with st.expander("Manual overrides (mirror offline segment overrides)", expanded=False):
-        ovr_enable = st.checkbox("Enable manual overrides", value=False, key="sc_ovr_enable")
+    with st.expander("Manual overrides (mirror Offline segment overrides)", expanded=False):
+        ovr_enable = st.checkbox("Enable manual overrides", value=False, key="sc_ovr_enable", on_change=_lock_to_setpoint)
         o1, o2 = st.columns(2)
         with o1:
-            o_vmin_on = st.checkbox("Override v_cell_min", value=False, disabled=not ovr_enable, key="sc_ovr_vmin_on")
+            o_vmin_on = st.checkbox("Override v_cell_min (used)", value=False, disabled=not ovr_enable, key="sc_ovr_vmin_on", on_change=_lock_to_setpoint)
             o_vmin = st.number_input(
                 "v_cell_min override [V]",
                 value=2.80,
                 step=0.05,
                 disabled=(not ovr_enable or not o_vmin_on),
                 key="sc_ovr_vmin",
+                on_change=_lock_to_setpoint,
             )
-            o_t_on = st.checkbox("Override t_rack", value=False, disabled=not ovr_enable, key="sc_ovr_t_on")
+            o_t_on = st.checkbox("Override T_rack_used", value=False, disabled=not ovr_enable, key="sc_ovr_t_on", on_change=_lock_to_setpoint)
             o_t = st.number_input(
-                "t_rack override [°C]",
+                "T_rack_used override [°C]",
                 value=30.0,
                 step=1.0,
                 disabled=(not ovr_enable or not o_t_on),
                 key="sc_ovr_t",
+                on_change=_lock_to_setpoint,
             )
         with o2:
-            o_vmax_on = st.checkbox("Override v_cell_max", value=False, disabled=not ovr_enable, key="sc_ovr_vmax_on")
+            o_vmax_on = st.checkbox("Override v_cell_max (used)", value=False, disabled=not ovr_enable, key="sc_ovr_vmax_on", on_change=_lock_to_setpoint)
             o_vmax = st.number_input(
                 "v_cell_max override [V]",
                 value=3.55,
                 step=0.05,
                 disabled=(not ovr_enable or not o_vmax_on),
                 key="sc_ovr_vmax",
+                on_change=_lock_to_setpoint,
             )
-            o_i_on = st.checkbox("Override i_rack", value=False, disabled=not ovr_enable, key="sc_ovr_i_on")
+            o_i_on = st.checkbox("Override i_rack (used)", value=False, disabled=not ovr_enable, key="sc_ovr_i_on", on_change=_lock_to_setpoint)
             o_i = st.number_input(
                 "i_rack override [A]",
                 value=0.0,
                 step=50.0,
                 disabled=(not ovr_enable or not o_i_on),
                 key="sc_ovr_i",
+                on_change=_lock_to_setpoint,
             )
-        o_gas_on = st.checkbox("Override gas_alarm", value=False, disabled=not ovr_enable, key="sc_ovr_gas_on")
-        o_gas = st.checkbox("gas_alarm override = TRUE", value=False, disabled=(not ovr_enable or not o_gas_on), key="sc_ovr_gas")
+        o_gas_on = st.checkbox("Override gas_alarm", value=False, disabled=not ovr_enable, key="sc_ovr_gas_on", on_change=_lock_to_setpoint)
+        o_gas = st.checkbox("gas_alarm override = TRUE", value=False, disabled=(not ovr_enable or not o_gas_on), key="sc_ovr_gas", on_change=_lock_to_setpoint)
 
-    # -----------------------------
-    # Create / reuse sim
-    # -----------------------------
     if "scada_sim" not in st.session_state:
         st.session_state.scada_sim = LiveBmsSim(
             params,
@@ -857,13 +1091,13 @@ def render_scada_playground(
             profile=LiveProfile(mode=str(profile_mode), i_setpoint_a=float(i_set), ramp_a_per_s=float(ramp)),
             uv_v_fault=float(uv_v),
             ot_temp_c=float(ot_c),
+            ut_temp_c=float(ut_c),
             oc_i_fault_a=float(oc_a),
             history_max_points=int(history_max_points),
         )
 
     sim: LiveBmsSim = st.session_state.scada_sim
 
-    # Apply live-updatable knobs
     sim.t_amb_c = float(t_amb)
     sim.true_init_soc = _clip01(float(true_soc))
     sim.ekf_init_soc = _clip01(float(ekf_soc))
@@ -877,13 +1111,14 @@ def render_scada_playground(
     sim.set_ramp_a_per_s(float(ramp))
     sim.set_history_max_points(int(history_max_points))
 
-    # Interventions
     sim.inj.uv = bool(inj_uv)
     sim.inj.ot = bool(inj_ot)
+    sim.inj.ut = bool(inj_ut)
     sim.inj.oc = bool(inj_oc)
     sim.inj.fire = bool(inj_fire)
     sim.uv_v_fault = float(uv_v)
     sim.ot_temp_c = float(ot_c)
+    sim.ut_temp_c = float(ut_c)
     sim.oc_i_fault_a = float(oc_a)
 
     sim.ovr.enabled = bool(ovr_enable)
@@ -893,9 +1128,6 @@ def render_scada_playground(
     sim.ovr.i_rack_override_a = float(o_i) if (ovr_enable and o_i_on) else None
     sim.ovr.gas_alarm_override = bool(o_gas) if (ovr_enable and o_gas_on) else None
 
-    # -----------------------------
-    # Run controls
-    # -----------------------------
     st.subheader("Run controls")
     r1, r2, r3, r4, r5, r6 = st.columns([1.1, 1.1, 1.0, 1.0, 1.2, 1.6])
 
@@ -927,7 +1159,7 @@ def render_scada_playground(
             st.session_state.scada_running = False
             st.session_state.sync_autorun_toggle = True
             st.session_state.scada_event_log = deque(maxlen=200)
-            st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "fire": 0}
+            st.session_state.scada_prev_flags = {"oc": 0, "ov": 0, "uv": 0, "ot": 0, "ut": 0, "fire": 0}
             st.session_state.scada_prev_state_code = None
 
             st.session_state.scada_sim = LiveBmsSim(
@@ -944,6 +1176,7 @@ def render_scada_playground(
                 profile=LiveProfile(mode=str(profile_mode), i_setpoint_a=float(i_set), ramp_a_per_s=float(ramp)),
                 uv_v_fault=float(uv_v),
                 ot_temp_c=float(ot_c),
+                ut_temp_c=float(ut_c),
                 oc_i_fault_a=float(oc_a),
                 history_max_points=int(history_max_points),
             )
@@ -967,9 +1200,6 @@ def render_scada_playground(
     st.caption(f"Run state: {'RUNNING (auto-run)' if running else 'STOPPED'}")
     st.divider()
 
-    # -----------------------------
-    # Auto-run step (IMPORTANT: NO rerun here)
-    # -----------------------------
     do_rerun = False
     if running:
         for _ in range(int(steps_per_tick)):
@@ -977,9 +1207,6 @@ def render_scada_playground(
             _update_events_from_step(out)
         do_rerun = True
 
-    # -----------------------------
-    # Data snapshot for UI
-    # -----------------------------
     arr = sim.to_npz()
     if arr["time_s"].size < 2:
         st.info("No samples yet. Use Step buttons or press Start.")
@@ -988,40 +1215,48 @@ def render_scada_playground(
             st.rerun()
         return
 
-    # Latest values (for KPI + alarms)
     t_end = float(arr["time_s"][-1])
     last = {k: float(arr[k][-1]) for k in arr.keys() if arr[k].size > 0}
 
-    active_faults = [k.upper() for k in ("oc", "ov", "uv", "ot", "fire") if last.get(k, 0.0) > 0.5]
+    active_faults = [k.upper() for k in ("oc", "ov", "uv", "ot", "ut", "fire") if last.get(k, 0.0) > 0.5]
     state_last_code = int(last.get("state_code", -999))
     state_name = STATE_NAME_MAP.get(state_last_code, str(state_last_code))
 
-    # -----------------------------
-    # KPI / status bar
-    # -----------------------------
     st.subheader("Status")
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
+
     with k1:
         st.metric("State", state_name)
+
     with k2:
         st.metric("Faults (active)", ", ".join(active_faults) if active_faults else "None")
+
     with k3:
         st.metric("I_req [A]", f"{last.get('i_req_a', np.nan):.1f}")
         st.metric("I_act [A]", f"{last.get('i_act_a', np.nan):.1f}")
+        st.metric("I_used [A]", f"{last.get('i_rack_used_a', np.nan):.1f}")
+
+        i_req_last = float(last.get("i_req_a", np.nan))
+        lim_code = last.get("lim_code_dis", np.nan) if (np.isfinite(i_req_last) and i_req_last >= 0.0) else last.get(
+            "lim_code_chg", np.nan
+        )
+        st.metric("Limiter", _lim_code_name(lim_code))
+
     with k4:
+        st.metric("SoC_true", f"{last.get('soc_true', np.nan):.3f}")
+        st.metric("SoC_EKF", f"{last.get('soc_hat', np.nan):.3f}")
+
+    with k5:
         soc_true = last.get("soc_true", np.nan)
         soc_hat = last.get("soc_hat", np.nan)
-        st.metric("SoC_true", f"{soc_true:.3f}")
-        st.metric("SoC_EKF", f"{soc_hat:.3f}")
-    with k5:
         st.metric("SoC error", f"{(soc_true - soc_hat):.3f}")
-        st.metric("T_rack [°C]", f"{last.get('t_rack_c', np.nan):.1f}")
-    with k6:
-        st.metric("V_cell_min [V]", f"{last.get('v_cell_min_v', np.nan):.3f}")
-        st.metric("V_cell_max [V]", f"{last.get('v_cell_max_v', np.nan):.3f}")
+        st.metric("T_used [°C]", f"{last.get('t_rack_used_c', np.nan):.1f}")
 
-    # Alarm banner
+    with k6:
+        st.metric("V_cell_min used [V]", f"{last.get('v_cell_min_v', np.nan):.3f}")
+        st.metric("V_cell_max used [V]", f"{last.get('v_cell_max_v', np.nan):.3f}")
+
     if active_faults:
         severities = [_severity_for_fault(f.lower()) for f in active_faults]
         if "CRITICAL" in severities:
@@ -1031,9 +1266,22 @@ def render_scada_playground(
     else:
         st.success("No active alarms.")
 
-    # -----------------------------
-    # Alarm table + event log
-    # -----------------------------
+    if bool(use_limits):
+        limits_row = {
+            "i_discharge_max_allowed": float(last.get("i_discharge_lim_a", np.nan)),
+            "i_charge_max_allowed": float(last.get("i_charge_lim_a", np.nan)),
+        }
+        kind, msg = _compute_inhibit_banner(
+            params, t_used_c=float(last.get("t_rack_used_c", np.nan)), limits_row=limits_row
+        )
+        if kind and msg:
+            if kind == "warning":
+                st.warning(msg)
+            elif kind == "error":
+                st.error(msg)
+            else:
+                st.info(msg)
+
     with st.expander("Alarm table & event log", expanded=False):
         st.markdown("**Event log filters**")
         f1, f2, f3 = st.columns([1.2, 1.8, 1.0])
@@ -1066,25 +1314,33 @@ def render_scada_playground(
 
         st.markdown("**Alarm table**")
         alarm_rows = []
-        for f in ("oc", "ov", "uv", "ot", "fire"):
+        meaning_map = {
+            "oc": "Over-current detected (direction-dependent).",
+            "ov": "Cell over-voltage (v_cell_max above limit).",
+            "uv": "Cell under-voltage (v_cell_min below limit).",
+            "ot": "Over-temperature (T_used above OT threshold).",
+            "ut": "Under-temperature (T_used below UT threshold).",
+            "fire": "Gas/smoke alarm input active.",
+        }
+        action_map = {
+            "oc": "Limit current / check load profile.",
+            "ov": "Stop charge / verify cell voltages.",
+            "uv": "Stop discharge / verify SoC and cell voltages.",
+            "ot": "Reduce load / increase cooling; stop if persistent.",
+            "ut": "Reduce/stop charge (and possibly discharge) until temperature recovers.",
+            "fire": "Emergency response per safety concept (ESD).",
+        }
+        for f in ("oc", "ov", "uv", "ot", "ut", "fire"):
             is_on = bool(last.get(f, 0.0) > 0.5)
             sev = _severity_for_fault(f)
-            meaning = {
-                "oc": "Over-current detected (direction-dependent).",
-                "ov": "Cell over-voltage (v_cell_max above limit).",
-                "uv": "Cell under-voltage (v_cell_min below limit).",
-                "ot": "Over-temperature (rack temperature above limit).",
-                "fire": "Gas/smoke alarm input active.",
-            }[f]
-            action = {
-                "oc": "Limit current / check load profile.",
-                "ov": "Stop charge / verify cell voltages.",
-                "uv": "Stop discharge / verify SoC and cell voltages.",
-                "ot": "Reduce load / increase cooling; stop if persistent.",
-                "fire": "Emergency response per safety concept (ESD).",
-            }[f]
             alarm_rows.append(
-                {"Fault": f.upper(), "Active": is_on, "Severity": sev, "Meaning": meaning, "Recommended action": action}
+                {
+                    "Fault": f.upper(),
+                    "Active": is_on,
+                    "Severity": sev,
+                    "Meaning": meaning_map[f],
+                    "Recommended action": action_map[f],
+                }
             )
         st.dataframe(alarm_rows, use_container_width=True, hide_index=True)
 
@@ -1100,9 +1356,6 @@ def render_scada_playground(
 
     st.divider()
 
-    # -----------------------------
-    # Plotting (rolling window + decimation)
-    # -----------------------------
     t = arr["time_s"]
     t_start = max(0.0, t_end - float(window_s))
     mask = t >= t_start
@@ -1124,26 +1377,43 @@ def render_scada_playground(
     t_w = t_w[sl]
     i_req = w("i_req_a")[sl]
     i_act = w("i_act_a")[sl]
-    soc_true = w("soc_true")[sl]
-    soc_hat = w("soc_hat")[sl]
-    soc_err = soc_true - soc_hat
-    v_min = w("v_cell_min_v")[sl]
-    v_max = w("v_cell_max_v")[sl]
-    t_rack = w("t_rack_c")[sl]
+    i_used = w("i_rack_used_a")[sl]
+
+    soc_true_s = w("soc_true")[sl]
+    soc_hat_s = w("soc_hat")[sl]
+    soc_err = soc_true_s - soc_hat_s
+
+    v_min_used = w("v_cell_min_v")[sl]
+    v_max_used = w("v_cell_max_v")[sl]
+    v_min_true = w("v_cell_min_true_v")[sl]
+    v_max_true = w("v_cell_max_true_v")[sl]
+
+    t_true = w("t_rack_true_c")[sl]
+    t_used = w("t_rack_used_c")[sl]
     t_amb_series = w("t_amb_c")[sl]
+
     state = w("state_code")[sl]
     oc = w("oc")[sl]
     ov = w("ov")[sl]
     uv = w("uv")[sl]
     ot = w("ot")[sl]
+    ut = w("ut")[sl]
     fire = w("fire")[sl]
 
-    # --- Event markers (vertical lines) ---
+    i_dis_lim = w("i_discharge_lim_a")[sl]
+    i_chg_lim = w("i_charge_lim_a")[sl]
+    soc_spread = (w("soc_cell_max") - w("soc_cell_min"))[sl]
+    v_spread = (v_max_used - v_min_used)
+
     event_markers = []
     if marker_scope != "Off":
         _ensure_event_log()
-        all_events = list(reversed(list(st.session_state.scada_event_log)))  # oldest -> newest
-        allowed_types = {"FAULT_ASSERT", "FAULT_CLEAR"} if marker_scope == "Faults only" else {"FAULT_ASSERT", "FAULT_CLEAR", "STATE_CHANGE"}
+        all_events = list(reversed(list(st.session_state.scada_event_log)))
+        allowed_types = {"FAULT_ASSERT", "FAULT_CLEAR"} if marker_scope == "Faults only" else {
+            "FAULT_ASSERT",
+            "FAULT_CLEAR",
+            "STATE_CHANGE",
+        }
 
         for ev in all_events:
             try:
@@ -1157,11 +1427,6 @@ def render_scada_playground(
             if ev.get("type") in allowed_types:
                 event_markers.append(ev)
 
-    i_dis_lim = w("i_discharge_lim_a")[sl]
-    i_chg_lim = w("i_charge_lim_a")[sl]
-    soc_spread = (w("soc_cell_max") - w("soc_cell_min"))[sl]
-    v_spread = (v_max - v_min)
-
     def _fault_y(flag: np.ndarray, y: float) -> np.ndarray:
         return np.where(flag > 0.5, y, np.nan)
 
@@ -1170,6 +1435,7 @@ def render_scada_playground(
 
     ax_i.plot(t_w, i_req, label="I_req [A]")
     ax_i.plot(t_w, i_act, label="I_act [A]")
+    ax_i.plot(t_w, i_used, linestyle=":", label="I_used [A] (BMS perceived)")
     if np.any(np.isfinite(i_dis_lim)):
         ax_i.plot(t_w, i_dis_lim, linestyle="--", label="I_dis_limit [A]")
     if np.any(np.isfinite(i_chg_lim)):
@@ -1178,8 +1444,8 @@ def render_scada_playground(
     ax_i.grid(True)
     ax_i.legend(loc="upper right")
 
-    ax_soc.plot(t_w, soc_true, label="SoC_true")
-    ax_soc.plot(t_w, soc_hat, label="SoC_EKF")
+    ax_soc.plot(t_w, soc_true_s, label="SoC_true")
+    ax_soc.plot(t_w, soc_hat_s, label="SoC_EKF")
     ax_soc.set_ylabel("SoC")
     ax_soc.grid(True)
     ax_soc.legend(loc="upper right")
@@ -1189,22 +1455,18 @@ def render_scada_playground(
     ax_err.grid(True)
     ax_err.legend(loc="upper right")
 
-    ax_v.plot(t_w, v_min, label="V_cell_min [V]")
-    ax_v.plot(t_w, v_max, label="V_cell_max [V]")
+    ax_v.plot(t_w, v_min_used, label="V_cell_min USED [V]")
+    ax_v.plot(t_w, v_max_used, label="V_cell_max USED [V]")
+    if np.nanmax(np.abs(v_min_true - v_min_used)) > 1e-9 or np.nanmax(np.abs(v_max_true - v_max_used)) > 1e-9:
+        ax_v.plot(t_w, v_min_true, linestyle=":", label="V_cell_min TRUE [V]")
+        ax_v.plot(t_w, v_max_true, linestyle=":", label="V_cell_max TRUE [V]")
     ax_v.set_ylabel("Cell V")
-
-    v_lo = np.nanmin(np.concatenate([v_min, v_max]))
-    v_hi = np.nanmax(np.concatenate([v_min, v_max]))
-    if np.isfinite(v_lo) and np.isfinite(v_hi):
-        span = max(0.1, v_hi - v_lo)
-        margin = 0.10 * span
-        ax_v.set_ylim(v_lo - margin, v_hi + margin)
-
     ax_v.grid(True)
     ax_v.legend(loc="upper right")
 
-    ax_temp.plot(t_w, t_rack, label="T_rack [°C]")
-    ax_temp.plot(t_w, t_amb_series, linestyle="--", label="T_amb [°C]")
+    ax_temp.plot(t_w, t_true, label="T_rack TRUE [°C]")
+    ax_temp.plot(t_w, t_used, linestyle="--", label="T_rack USED [°C]")
+    ax_temp.plot(t_w, t_amb_series, linestyle=":", label="T_amb [°C]")
     ax_temp.set_ylabel("Temp [°C]")
     ax_temp.grid(True)
     ax_temp.legend(loc="upper right")
@@ -1217,11 +1479,12 @@ def render_scada_playground(
     ax_sp.grid(True)
 
     ax_state.step(t_w, state, where="post", label="State code")
-    ax_state.plot(t_w, _fault_y(oc, 3.10), linestyle="--", label="OC")
-    ax_state.plot(t_w, _fault_y(ov, 3.20), linestyle="--", label="OV")
-    ax_state.plot(t_w, _fault_y(uv, 3.30), linestyle="--", label="UV")
-    ax_state.plot(t_w, _fault_y(ot, 3.40), linestyle="--", label="OT")
-    ax_state.plot(t_w, _fault_y(fire, 3.50), linestyle="--", label="FIRE")
+    ax_state.plot(t_w, _fault_y(oc, 3.05), linestyle="--", label="OC")
+    ax_state.plot(t_w, _fault_y(ov, 3.15), linestyle="--", label="OV")
+    ax_state.plot(t_w, _fault_y(uv, 3.25), linestyle="--", label="UV")
+    ax_state.plot(t_w, _fault_y(ot, 3.35), linestyle="--", label="OT")
+    ax_state.plot(t_w, _fault_y(ut, 3.45), linestyle="--", label="UT")
+    ax_state.plot(t_w, _fault_y(fire, 3.55), linestyle="--", label="FIRE")
     ax_state.set_ylabel("State / faults")
     ax_state.set_xlabel("Time [s]")
     ax_state.grid(True)
@@ -1249,28 +1512,27 @@ def render_scada_playground(
 
     st.caption(
         f"t={t_end:.1f}s | state={state_name} | "
-        f"T_amb={last.get('t_amb_c', np.nan):.1f}°C | T_rack={last.get('t_rack_c', np.nan):.1f}°C | "
+        f"T_amb={last.get('t_amb_c', np.nan):.1f}°C | T_used={last.get('t_rack_used_c', np.nan):.1f}°C | "
         f"SoC_true={last.get('soc_true', np.nan):.3f} | SoC_EKF={last.get('soc_hat', np.nan):.3f} | "
+        f"I_req={last.get('i_req_a', np.nan):.1f}A | I_act={last.get('i_act_a', np.nan):.1f}A | I_used={last.get('i_rack_used_a', np.nan):.1f}A | "
         f"hist={arr['time_s'].size}/{sim.history_max_points} pts | stride={stride} | "
         f"events_in_window={len(event_markers)}"
     )
 
-    # -----------------------------
-    # Documentation tabs (bottom)
-    # -----------------------------
     st.divider()
     st.subheader("Documentation")
 
-    tab1, tab2, tab3 = st.tabs(["Fault flags (OV/UV/OC/OT/FIRE)", "Fault injections", "Manual overrides"])
+    tab1, tab2, tab3 = st.tabs(["Fault flags (OV/UV/OC/OT/UT/FIRE)", "Fault injections", "Manual overrides"])
 
     with tab1:
         st.markdown(
             """
-**OV (Over-Voltage):** Triggered when the maximum cell voltage exceeds the configured upper threshold (`v_cell_max`).  
-**UV (Under-Voltage):** Triggered when the minimum cell voltage drops below the configured lower threshold (`v_cell_min`).  
+**OV (Over-Voltage):** Triggered when the maximum cell voltage exceeds the configured upper threshold.  
+**UV (Under-Voltage):** Triggered when the minimum cell voltage drops below the configured lower threshold.  
 **OC (Over-Current):** Triggered when the rack current exceeds configured safe limits (direction-dependent for charge vs. discharge).  
-**OT (Over-Temperature):** Triggered when the rack temperature exceeds the configured threshold (`t_rack`).  
-**FIRE (Gas alarm):** Represents a gas/smoke alarm signal. In many safety concepts this is tied to **emergency actions** (e.g., ESD).
+**OT (Over-Temperature):** Triggered when **T_used** exceeds the configured threshold.  
+**UT (Under-Temperature):** Triggered when **T_used** drops below the configured threshold.  
+**FIRE (Gas alarm):** Represents a gas/smoke alarm signal (typically mapped to emergency actions).
 
 On this page, fault flags are generated by the fault detector and then used by the FSM to transition between states.
             """
@@ -1280,13 +1542,16 @@ On this page, fault flags are generated by the fault detector and then used by t
         st.markdown(
             """
 **Fault injections** are designed for testing and demonstration. They do not necessarily modify the physical plant state.
-Instead, they **force the values that the fault detector “sees”**, so you can reliably trigger a given fault and observe
-the FSM behavior.
+Instead, they **force the values that the fault detector + limiter see** (the BMS perceived signals),
+so you can reliably trigger a given fault and observe the FSM behavior.
 
-- **UV injection:** Forces the detector input `v_cell_min` down to the selected voltage → UV becomes easy to trigger.
-- **OT injection:** Forces the detector input `t_rack` up to the selected temperature → OT becomes easy to trigger.
-- **OC injection:** Forces the detector input `i_rack` to the selected current magnitude → OC becomes easy to trigger.
-- **FIRE (gas alarm):** Sets `gas_alarm=True` → FIRE becomes active.
+- **UV injection:** Forces `v_cell_min_used` down to the selected voltage.
+- **OT injection:** Forces `T_used` up to the selected temperature.
+- **UT injection:** Forces `T_used` down to the selected temperature.
+- **OC injection:** Forces `I_used` to the selected current magnitude. Direction follows `I_req` (default discharge if `I_req≈0`).
+- **FIRE (gas alarm):** Sets `gas_alarm=True`.
+
+**Priority rule:** if both Manual override and Injection set the same signal, Injection wins.
             """
         )
 
@@ -1296,20 +1561,18 @@ the FSM behavior.
 **Manual overrides** mirror the Offline Scenarios “segment overrides” in a Live context.
 
 Goal: emulate measurement-layer effects and answer “What would the BMS do if it measured X?” by overriding what the
-fault detector receives.
+BMS logic receives.
 
-- **Override v_cell_min / v_cell_max:** Forces the cell-voltage statistics seen by the fault detector.
-- **Override t_rack:** Forces the rack temperature seen by the fault detector.
-- **Override i_rack:** Forces the rack current seen by the fault detector.
+- **Override v_cell_min / v_cell_max:** Forces the cell-voltage statistics seen by the limiter + fault detector.
+- **Override T_rack_used:** Forces the rack temperature seen by the limiter + fault detector.
+- **Override i_rack (used):** Forces **I_used** (rack current seen by the fault detector).
 - **Override gas_alarm:** Manually sets the gas-alarm signal.
 
-Important: Overrides typically affect the **perceived measurements** rather than the underlying physical plant model.
+Important: Overrides affect **perceived measurements** rather than the underlying physical plant model.
+That is why the plots show both TRUE and USED signals (and why `I_used` may differ from `I_act`).
             """
         )
 
-    # -----------------------------
-    # Final: schedule next refresh AFTER UI is rendered
-    # -----------------------------
     if do_rerun:
         time.sleep(float(refresh_ms) / 1000.0)
         st.rerun()

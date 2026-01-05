@@ -19,7 +19,7 @@ st.title("Live SCADA")
 
 st.markdown(
     "This page runs the offline simulation stack (ECM + Thermal + EKF + Fault Detector + FSM) step-by-step "
-    "to provide a SCADA-like monitoring experience."
+    "to provide a SCADA-like monitoring."
 )
 
 # -----------------------------
