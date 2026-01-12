@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,7 +11,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from src.config import load_params
+from src.scenarios import load_scenarios, Scenario
+from src.sim_runner import run_scenario
+from src.config import load_params, PROFILES
 from src.metrics import (
     compute_safety_metrics,
     compute_operational_metrics,
@@ -21,8 +24,8 @@ from run_manual_bms_scenario import Segment, FaultConfig, run_manual_profile
 
 # ---------------- Cache / helpers ----------------
 @st.cache_data
-def get_params() -> Dict[str, Any]:
-    return load_params()
+def get_params(cfg_path: str) -> Dict[str, Any]:
+    return load_params(cfg_path)
 
 
 def fmt(x: Any, nd: int = 3) -> str:
@@ -36,6 +39,19 @@ def fmt(x: Any, nd: int = 3) -> str:
 
 def _none_to_nan(x: Optional[float]) -> float:
     return np.nan if x is None else float(x)
+
+
+def _deep_update(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursive dict update.
+    Modifies dst in-place and returns it.
+    """
+    for k, v in (src or {}).items():
+        if isinstance(v, dict) and isinstance(dst.get(k, None), dict):
+            _deep_update(dst[k], v)
+        else:
+            dst[k] = v
+    return dst
 
 
 def _build_piecewise_profile(t: np.ndarray, segments: List[Segment], field: str) -> np.ndarray:
@@ -56,6 +72,88 @@ def _build_piecewise_profile(t: np.ndarray, segments: List[Segment], field: str)
     return out
 
 
+def _get_q_nom_ah(params: Dict[str, Any]) -> float:
+    # Prefer electrical_model.q_nom_ah, fallback to chemistry.cell_capacity_ah
+    em = params.get("electrical_model", {}) or {}
+    ch = params.get("chemistry", {}) or {}
+    q = em.get("q_nom_ah", None)
+    if q is None:
+        q = ch.get("cell_capacity_ah", 0.0)
+    try:
+        return float(q)
+    except Exception:
+        return 0.0
+
+
+def _compute_soc_cc(
+    *,
+    t: np.ndarray,
+    i_act: np.ndarray,
+    dt_s: float,
+    q_nom_ah: float,
+    soc0: float,
+) -> np.ndarray:
+    """
+    CC-only SoC reference starting from soc0 (EKF init), using applied current i_act.
+    Sign convention in this project:
+      +I => discharge => SoC decreases
+      -I => charge    => SoC increases
+    """
+    n = int(len(t))
+    soc = np.zeros(n, dtype=float)
+    soc[0] = float(soc0)
+    denom = float(q_nom_ah) * 3600.0
+    if denom <= 0:
+        return soc
+
+    for k in range(1, n):
+        ds = -float(i_act[k - 1]) * float(dt_s) / denom
+        soc[k] = float(np.clip(soc[k - 1] + ds, 0.0, 1.0))
+    return soc
+
+
+def _attach_demo_series_if_possible(
+    result: Dict[str, Any],
+    *,
+    params: Dict[str, Any],
+    dt_s: float,
+    ekf_init_soc: Optional[float],
+) -> None:
+    """
+    Adds helper series for plotting/reporting without touching core sim code.
+    - soc_cc: coulomb-counting only SoC reference starting from EKF init SoC.
+    """
+    try:
+        if ekf_init_soc is None:
+            return
+        t = np.asarray(result.get("time_s", []), dtype=float)
+        if len(t) == 0:
+            return
+        i_act = np.asarray(result.get("i_act_a", result.get("i_req_a", [])), dtype=float)
+        if len(i_act) != len(t):
+            return
+
+        q_nom_ah = _get_q_nom_ah(params)
+        if q_nom_ah <= 0:
+            return
+
+        soc_cc = _compute_soc_cc(
+            t=t,
+            i_act=i_act,
+            dt_s=float(dt_s),
+            q_nom_ah=float(q_nom_ah),
+            soc0=float(ekf_init_soc),
+        )
+        # store as list for JSON-ish compatibility
+        result["soc_cc"] = soc_cc.tolist()
+        # store meta scalars too (helpful for report)
+        result["meta_ekf_init_soc"] = [float(ekf_init_soc)]
+        result["meta_q_nom_ah_used"] = [float(q_nom_ah)]
+    except Exception:
+        # keep UI robust; no hard fail
+        return
+
+
 def make_manual_npz_bytes(
     result: dict,
     *,
@@ -65,6 +163,7 @@ def make_manual_npz_bytes(
     true_init_soc: float,
     ekf_init_soc: float,
     dt_s: float,
+    ekf_overrides: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Create an in-memory .npz for the manual run.
@@ -77,6 +176,10 @@ def make_manual_npz_bytes(
     export["meta_true_init_soc"] = np.asarray([float(true_init_soc)], dtype=float)
     export["meta_ekf_init_soc"] = np.asarray([float(ekf_init_soc)], dtype=float)
     export["meta_use_bms_limits"] = np.asarray([1 if use_limits else 0], dtype=int)
+
+    if ekf_overrides:
+        # store as string to avoid nested arrays complexity
+        export["meta_ekf_overrides_jsonish"] = np.asarray([str(ekf_overrides)], dtype=object)
 
     # ---- Segment definition ----
     export["segments_duration_s"] = np.asarray([float(s.duration_s) for s in segments], dtype=float)
@@ -133,6 +236,7 @@ class Preset:
     use_limits: bool
     true_init_soc: float
     ekf_init_soc: float
+    ekf_overrides: Optional[Dict[str, Any]] = None  # runtime overrides (demo), does not touch YAML
 
 
 def _presets(dt_s: float) -> List[Preset]:
@@ -266,11 +370,14 @@ def _presets(dt_s: float) -> List[Preset]:
         ),
         Preset(
             key="ekf_convergence",
-            title="EKF convergence demo (initial SoC mismatch)",
-            description="Run a normal discharge while EKF starts with wrong SoC. Observe error convergence.",
+            title="EKF demo: init mismatch vs CC-only reference",
+            description=(
+                "Run a normal discharge while EKF starts with wrong SoC. "
+                "We also plot a CC-only reference (soc_cc) starting from EKF init to make the mismatch visible."
+            ),
             expected=(
-                "Expected: SoC error starts at (true - ekf_init) and converges toward 0 over time. "
-                "No safety faults should trigger in this preset."
+                "Expected: EKF SoC (post) tracks SoC_true closely, while CC-only reference remains offset "
+                "when EKF init != true init. No safety faults should trigger."
             ),
             segments=[
                 {"duration_s": 1200.0, "current_a": 200.0, "t_amb_c": 25.0},
@@ -280,6 +387,18 @@ def _presets(dt_s: float) -> List[Preset]:
             use_limits=True,
             true_init_soc=0.50,
             ekf_init_soc=0.80,
+            # Optional: slow down the immediate correction if needed for nicer plots
+            ekf_overrides={
+                "estimation": {
+                    "ekf": {
+                        # smaller P0 -> trust init more; larger R -> trust voltage less
+                        "initial_covariance": {"soc": 1.0e-6},
+                        "r_measurement": {"v_terminal": 0.0025},
+                        # keep some process noise so P can grow and allow correction over time if your model is too "perfect"
+                        "q_process": {"soc": 1.0e-8},
+                    }
+                }
+            },
         ),
     ]
 
@@ -391,16 +510,34 @@ def evaluate_preset_run(
     elif key == "ekf_convergence":
         soc_true = np.asarray(result["soc_true"], dtype=float)
         soc_hat = np.asarray(result["soc_hat"], dtype=float)
-        err = soc_true - soc_hat
 
         safety_any = safety.get("t_fault_any_s", None)
         ok_no_fault = (safety_any is None)
         add_check("No safety faults", ok_no_fault, f"t_fault_any_s={fmt(safety_any)}")
 
-        e0 = float(abs(err[0])) if len(err) else float("nan")
-        e_end = float(abs(err[-1])) if len(err) else float("nan")
-        ok_conv = (np.isfinite(e0) and np.isfinite(e_end) and (e_end < e0) and (e_end < 0.10))
-        add_check("SoC error converges", ok_conv, f"|e0|={e0:.4f}, |e_end|={e_end:.4f} (target < 0.10 and decreasing)")
+        # We want to show mismatch is present (by design), but soc_hat[0] is often posterior at t=0.
+        init_mismatch = abs(float(preset.true_init_soc) - float(preset.ekf_init_soc))
+        add_check(
+            "Init mismatch configured",
+            bool(init_mismatch >= 0.05),
+            f"|true_init - ekf_init| = {init_mismatch:.3f} (target >= 0.05)"
+        )
+
+        # EKF tracking quality at end
+        err_post = soc_true - soc_hat
+        e_end = float(abs(err_post[-1])) if len(err_post) else float("nan")
+        ok_end = np.isfinite(e_end) and (e_end < 0.05)
+        add_check("EKF end error small", ok_end, f"|e_end|={e_end:.4f} (target < 0.05)")
+
+        # If CC-only series exists, show EKF improvement vs CC-only
+        if "soc_cc" in result:
+            soc_cc = np.asarray(result["soc_cc"], dtype=float)
+            err_cc = soc_true - soc_cc
+            e_cc_end = float(abs(err_cc[-1])) if len(err_cc) else float("nan")
+            ok_improve = np.isfinite(e_cc_end) and np.isfinite(e_end) and (e_end < 0.5 * e_cc_end)
+            add_check("EKF improves vs CC-only", ok_improve, f"|e_end|={e_end:.4f}, |e_cc_end|={e_cc_end:.4f} (target: EKF < 50% of CC)")
+        else:
+            add_check("CC-only reference available", False, "soc_cc not found in result (plot will be less illustrative).")
 
     overall = all(bool(r["pass"]) for r in checks) if checks else True
     return overall, checks
@@ -416,6 +553,14 @@ def _init_ui_state_defaults() -> None:
 
     st.session_state.setdefault("true_init_soc_ui", 0.50)
     st.session_state.setdefault("ekf_init_soc_ui", 0.80)
+
+    # EKF demo overrides (manual)
+    st.session_state.setdefault("ekf_override_enable", False)
+    st.session_state.setdefault("ekf_override_p0_soc", 1.0e-6)
+    st.session_state.setdefault("ekf_override_r_v", 0.0025)
+    st.session_state.setdefault("ekf_override_q_soc", 1.0e-8)
+
+    st.session_state.setdefault("plot_show_soc_cc", True)
 
     st.session_state.setdefault("uv_enable", False)
     st.session_state.setdefault("uv_time", 1200.0)
@@ -488,6 +633,14 @@ def _reset_to_safe_defaults(max_segments: int = 6, *, reset_initial_conditions: 
         st.session_state["true_init_soc_ui"] = 0.50
         st.session_state["ekf_init_soc_ui"] = 0.80
 
+    # EKF override defaults (manual)
+    st.session_state["ekf_override_enable"] = False
+    st.session_state["ekf_override_p0_soc"] = 1.0e-6
+    st.session_state["ekf_override_r_v"] = 0.0025
+    st.session_state["ekf_override_q_soc"] = 1.0e-8
+
+    st.session_state["plot_show_soc_cc"] = True
+
     # reset preset tracking
     st.session_state["offline_last_preset_key"] = None
 
@@ -531,6 +684,14 @@ def _apply_preset_to_ui(p: Preset) -> None:
     st.session_state["use_limits"] = bool(p.use_limits)
     st.session_state["true_init_soc_ui"] = float(p.true_init_soc)
     st.session_state["ekf_init_soc_ui"] = float(p.ekf_init_soc)
+
+    # If preset includes EKF overrides, enable them for demo runs by default
+    if p.ekf_overrides:
+        st.session_state["ekf_override_enable"] = True
+        ekf = (p.ekf_overrides.get("estimation", {}).get("ekf", {}) if isinstance(p.ekf_overrides, dict) else {}) or {}
+        st.session_state["ekf_override_p0_soc"] = float((ekf.get("initial_covariance", {}) or {}).get("soc", 1.0e-6))
+        st.session_state["ekf_override_r_v"] = float((ekf.get("r_measurement", {}) or {}).get("v_terminal", 0.0025))
+        st.session_state["ekf_override_q_soc"] = float((ekf.get("q_process", {}) or {}).get("soc", 1.0e-8))
 
 
 def _set_notice(kind: str, msg: str) -> None:
@@ -586,13 +747,52 @@ def _faults_from_preset(p: Preset) -> FaultConfig:
     )
 
 
+def _build_ekf_override_dict_from_ui() -> Optional[Dict[str, Any]]:
+    if not bool(st.session_state.get("ekf_override_enable", False)):
+        return None
+    try:
+        p0 = float(st.session_state.get("ekf_override_p0_soc", 1.0e-6))
+        rv = float(st.session_state.get("ekf_override_r_v", 0.0025))
+        qs = float(st.session_state.get("ekf_override_q_soc", 1.0e-8))
+        return {
+            "estimation": {
+                "ekf": {
+                    "initial_covariance": {"soc": p0},
+                    "r_measurement": {"v_terminal": rv},
+                    "q_process": {"soc": qs},
+                }
+            }
+        }
+    except Exception:
+        return None
+
+
 # ---------------- Page ----------------
 _init_ui_state_defaults()
 
 st.title("Offline Scenarios")
 st.caption("Preset tests + manual builder for offline BMS validation (single rack).")
 
-params = get_params()
+# Ensure profile state exists even if user opens this page directly
+profiles = list(PROFILES.keys())
+default_profile = "LUNA" if "LUNA" in PROFILES else profiles[0]
+
+if "active_profile" not in st.session_state:
+    st.session_state.active_profile = default_profile
+
+# Allow switching profile directly on this page
+st.sidebar.selectbox("Rack profile", profiles, key="active_profile")
+
+active = st.session_state.active_profile
+st.session_state.active_config_path = PROFILES[active]["params"]
+st.session_state.active_scenarios_path = PROFILES[active]["scenarios"]
+
+cfg_path = st.session_state.active_config_path
+params = get_params(cfg_path)
+
+st.sidebar.caption(f"Config: {cfg_path}")
+st.sidebar.caption(f"Scenarios: {st.session_state.active_scenarios_path}")
+
 dt_s = float(params["simulation"]["dt_s"])
 
 limits = params["limits"]
@@ -633,6 +833,9 @@ for k, default in [
     ("offline_last_fault_inj", None),
     ("offline_last_use_limits", True),
     ("offline_last_preset_key", None),
+    ("offline_last_true_init_soc", None),
+    ("offline_last_ekf_init_soc", None),
+    ("offline_last_ekf_overrides", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = default
@@ -661,34 +864,69 @@ st.info(
     "They do **not** force the plant physics. This is intentional for operator-style validation."
 )
 
-with st.expander("How to read the plots (recommended)", expanded=True):
-    st.markdown(
-        """
-**Currents**
-- `I_req` is the requested current (from your segment profile).
-- `I_act` is the applied current after BMS derating/limits and FSM state.
-- `Current (A)`: positive means discharging (power delivered), negative means charging.
+# ---------------- YAML Scenario Runner (active profile) ----------------
+st.header("YAML Scenario Runner (Active profile)")
+st.caption(
+    "Runs scenarios from the active profile YAML file using src.sim_runner.run_scenario(). "
+    "This is independent from the Manual Builder below."
+)
 
-**Used vs True**
-- `V_cell min/max (true)`: computed from the plant model.
-- `V_cell min/max (used)`: the signals used by BMS logic after overrides/injections.
-- If you apply overrides/injections, **used can differ from true**.
+scenarios_path = st.session_state.get("active_scenarios_path", None)
+if not scenarios_path:
+    st.warning("No scenarios YAML path found for the active profile.")
+else:
+    try:
+        yaml_scenarios = load_scenarios(scenarios_path)
+    except Exception as e:
+        st.error("Failed to load scenarios YAML for the active profile.")
+        st.code(f"{scenarios_path}\n\n{e}")
+        yaml_scenarios = []
 
-**State timeline**
-- `state_code`: OFF=0, RUN=1, FAULT=2, EMERGENCY=3
--  RUN: normal operation 
--  FAULT: a fault was detected (BMS typically limits or stops current) 
--  EMERGENCY_SHUTDOWN: critical condition, current is forced to zero
-- `fault_any`: 1 if any of UV/OV/OT/UT/OC is true (debounced)
+    if not yaml_scenarios:
+        st.warning("No scenarios found in the active YAML file.")
+    else:
+        scenario_ids = [s.id for s in yaml_scenarios]
+        selected_id = st.selectbox(
+            "Select a scenario ID",
+            options=scenario_ids,
+            index=0,
+            key="yaml_selected_scenario_id",
+        )
+        scn = next(s for s in yaml_scenarios if s.id == selected_id)
 
-**Derating markers**
-- Vertical lines mark times where `I_act != I_req` (limits active).
+        with st.expander("Scenario details", expanded=True):
+            st.markdown(f"**ID:** {scn.id}")
+            st.markdown(f"**Description:** {getattr(scn, 'description', '') or ''}")
+            st.markdown(f"**Profile type:** {getattr(scn, 'profile_type', '') or getattr(getattr(scn, 'profile', None), 'type', '')}")
+            st.markdown(f"**Max time [s]:** {getattr(scn, 'max_time_s', None)}")
+            st.markdown(f"**Stop on emergency:** {bool(getattr(scn, 'stop_on_emergency', False))}")
 
-**Trigger timing**
-- With `debounce_steps=N` and `dt=dt_s`, expect first trigger at:
-  `t_trigger ≈ t_inject + (N-1)*dt_s`
-"""
-    )
+        run_yaml = st.button("Run selected YAML scenario", use_container_width=True, key="run_yaml_btn")
+
+        if run_yaml:
+            with st.spinner("Running YAML scenario..."):
+                result = run_scenario(scn, params)
+
+            st.session_state["offline_last_result"] = result
+            st.session_state["offline_last_segments"] = getattr(scn, "segments", None)
+            st.session_state["offline_last_fault_inj"] = None
+            st.session_state["offline_last_use_limits"] = bool(getattr(scn, "use_bms_limits", True))
+            st.session_state["offline_last_preset_key"] = None
+
+            st.session_state["offline_last_true_init_soc"] = getattr(scn, "true_init_soc", None)
+            st.session_state["offline_last_ekf_init_soc"] = getattr(scn, "ekf_init_soc", None)
+            st.session_state["offline_last_ekf_overrides"] = None
+
+            # Add CC-only series if we have ekf init
+            _attach_demo_series_if_possible(
+                result,
+                params=params,
+                dt_s=float(dt_s),
+                ekf_init_soc=st.session_state["offline_last_ekf_init_soc"],
+            )
+
+            st.success(f"YAML scenario finished: {scn.id}. Scroll down for metrics and plots.")
+
 
 # ---------------- Quick Tests (Preset library) ----------------
 st.header("Quick Tests (Preset library)")
@@ -727,11 +965,17 @@ def _cb_run_preset_now() -> None:
     segs = _segments_from_preset(p)
     fault_inj = _faults_from_preset(p)
 
+    # Build runtime params (optional EKF overrides)
+    params_run = copy.deepcopy(params)
+    ekf_ov = p.ekf_overrides if isinstance(p.ekf_overrides, dict) else None
+    if ekf_ov:
+        _deep_update(params_run, ekf_ov)
+
     with st.spinner("Running preset scenario..."):
         result = run_manual_profile(
             segments=segs,
             faults=fault_inj,
-            params=params,
+            params=params_run,
             use_bms_limits=bool(p.use_limits),
             true_init_soc=float(p.true_init_soc),
             ekf_init_soc=float(p.ekf_init_soc),
@@ -743,6 +987,18 @@ def _cb_run_preset_now() -> None:
     st.session_state["offline_last_use_limits"] = bool(p.use_limits)
     st.session_state["offline_last_preset_key"] = p.key
 
+    st.session_state["offline_last_true_init_soc"] = float(p.true_init_soc)
+    st.session_state["offline_last_ekf_init_soc"] = float(p.ekf_init_soc)
+    st.session_state["offline_last_ekf_overrides"] = ekf_ov
+
+    # Attach CC-only series for plots and reporting
+    _attach_demo_series_if_possible(
+        result,
+        params=params_run,
+        dt_s=float(dt_s),
+        ekf_init_soc=float(p.ekf_init_soc),
+    )
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     st.session_state["offline_last_npz_name"] = f"offline_preset_{p.key}_{ts}.npz"
     st.session_state["offline_last_npz_bytes"] = make_manual_npz_bytes(
@@ -753,6 +1009,7 @@ def _cb_run_preset_now() -> None:
         true_init_soc=float(p.true_init_soc),
         ekf_init_soc=float(p.ekf_init_soc),
         dt_s=float(dt_s),
+        ekf_overrides=ekf_ov,
     )
 
     _set_notice("success", f"Preset run finished: {p.title}. Scroll down for PASS/FAIL + plots.")
@@ -794,7 +1051,26 @@ with cic2:
         value=float(st.session_state.get("ekf_init_soc_ui", 0.80)),
         step=0.01, key="ekf_init_soc_ui"
     )
-st.caption("Example: True=0.50, EKF=0.80 -> watch SoC error converge toward 0.")
+st.caption(
+    "Sign convention: **+I = discharge (SoC decreases)**, **-I = charge (SoC increases)**. "
+    "Example EKF demo: True=0.50, EKF=0.80."
+)
+
+with st.expander("EKF demo overrides (optional, per-run only)", expanded=False):
+    st.caption(
+        "If your EKF snaps to SoC_true at t=0 (very common with perfect OCV model), "
+        "enable this to slow the correction for a more illustrative convergence plot."
+    )
+    st.checkbox("Enable EKF overrides for this run", key="ekf_override_enable")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.number_input("P0(soc) initial covariance", min_value=0.0, value=float(st.session_state.get("ekf_override_p0_soc", 1.0e-6)), format="%.2e", key="ekf_override_p0_soc")
+    with c2:
+        st.number_input("R(v_terminal) measurement noise", min_value=0.0, value=float(st.session_state.get("ekf_override_r_v", 0.0025)), format="%.4f", key="ekf_override_r_v")
+    with c3:
+        st.number_input("Q(soc) process noise", min_value=0.0, value=float(st.session_state.get("ekf_override_q_soc", 1.0e-8)), format="%.2e", key="ekf_override_q_soc")
+
+st.checkbox("Show CC-only SoC reference (soc_cc) on plots", key="plot_show_soc_cc")
 
 n_segments = st.number_input(
     "Number of segments",
@@ -977,11 +1253,17 @@ with run_col2:
     st.caption("Tip: For quick fault logic tests, use injections/overrides. For plant-driven faults, increase current and run longer.")
 
 if run_btn:
+    # Runtime params copy (optional EKF overrides)
+    params_run = copy.deepcopy(params)
+    ekf_ov_ui = _build_ekf_override_dict_from_ui()
+    if ekf_ov_ui:
+        _deep_update(params_run, ekf_ov_ui)
+
     with st.spinner("Running offline BMS simulation..."):
         result = run_manual_profile(
             segments=segments,
             faults=fault_inj,
-            params=params,
+            params=params_run,
             use_bms_limits=bool(use_limits),
             true_init_soc=float(true_init_soc_ui),
             ekf_init_soc=float(ekf_init_soc_ui),
@@ -991,7 +1273,19 @@ if run_btn:
     st.session_state["offline_last_segments"] = segments
     st.session_state["offline_last_fault_inj"] = fault_inj
     st.session_state["offline_last_use_limits"] = bool(use_limits)
-    st.session_state["offline_last_preset_key"] = None  # manual run -> no preset validation
+    st.session_state["offline_last_preset_key"] = None
+
+    st.session_state["offline_last_true_init_soc"] = float(true_init_soc_ui)
+    st.session_state["offline_last_ekf_init_soc"] = float(ekf_init_soc_ui)
+    st.session_state["offline_last_ekf_overrides"] = ekf_ov_ui
+
+    # Attach CC-only series for plots and reporting
+    _attach_demo_series_if_possible(
+        result,
+        params=params_run,
+        dt_s=float(dt_s),
+        ekf_init_soc=float(ekf_init_soc_ui),
+    )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     st.session_state["offline_last_npz_name"] = f"offline_result_{ts}.npz"
@@ -1003,6 +1297,7 @@ if run_btn:
         true_init_soc=float(true_init_soc_ui),
         ekf_init_soc=float(ekf_init_soc_ui),
         dt_s=float(dt_s),
+        ekf_overrides=ekf_ov_ui,
     )
 
     st.success("Simulation finished. You can download the .npz below.")
@@ -1029,6 +1324,14 @@ if st.session_state.get("offline_last_result", None) is not None:
 
     soc_true = np.array(result["soc_true"], dtype=float)
     soc_hat = np.array(result["soc_hat"], dtype=float)
+
+    show_soc_cc = bool(st.session_state.get("plot_show_soc_cc", True))
+    soc_cc = None
+    if show_soc_cc and ("soc_cc" in result):
+        try:
+            soc_cc = np.array(result["soc_cc"], dtype=float)
+        except Exception:
+            soc_cc = None
 
     soc_min = np.array(result.get("soc_cell_min", soc_true), dtype=float)
     soc_max = np.array(result.get("soc_cell_max", soc_true), dtype=float)
@@ -1122,6 +1425,10 @@ if st.session_state.get("offline_last_result", None) is not None:
     v_spread = v_max - v_min
     fault_any = (oc | ov | uv | ot | fire)
 
+    soc_err_cc = None
+    if soc_cc is not None and len(soc_cc) == len(soc_true):
+        soc_err_cc = soc_true - soc_cc
+
     def first_time(mask: np.ndarray) -> Optional[float]:
         idx = np.where(mask)[0]
         return None if len(idx) == 0 else float(t[idx[0]])
@@ -1162,13 +1469,17 @@ if st.session_state.get("offline_last_result", None) is not None:
 
     ax = axes[1]
     ax.plot(t, soc_true, label="SoC true (rack)")
-    ax.plot(t, soc_hat, "--", label="SoC EKF")
+    ax.plot(t, soc_hat, "--", label="SoC EKF (post)")
+    if soc_cc is not None:
+        ax.plot(t, soc_cc, ":", label="SoC CC-only (from EKF init)")
     ax.set_ylabel("SoC [-]")
     ax.grid(True)
     ax.legend(loc="best")
 
     ax = axes[2]
-    ax.plot(t, soc_err, label="SoC error (true - EKF)")
+    ax.plot(t, soc_err, label="SoC error (true - EKF post)")
+    if soc_err_cc is not None:
+        ax.plot(t, soc_err_cc, ":", label="SoC error (true - CC-only)")
     ax.axhline(0.0, linestyle="--", linewidth=1.0)
     ax.set_ylabel("SoC error [-]")
     ax.grid(True)
@@ -1240,3 +1551,34 @@ if st.session_state.get("offline_last_result", None) is not None:
     if events:
         st.subheader("Event timeline")
         st.dataframe(events, use_container_width=True)
+
+with st.expander("How to read the plots (recommended)", expanded=False):
+    st.markdown(
+        """
+**Currents**
+- `I_req` is the requested current (from your segment profile).
+- `I_act` is the applied current after BMS derating/limits and FSM state.
+- Sign convention: **positive = discharging**, **negative = charging**.
+
+**EKF vs CC-only**
+- `SoC EKF (post)` is the EKF estimate you already log (after measurement update).
+- `SoC CC-only` is a reference computed in this UI: it starts from EKF init SoC and integrates current only.
+  It is shown to make the initial mismatch visible even if EKF corrects quickly.
+
+**Used vs True**
+- `V_cell min/max (true)`: computed from the plant model.
+- `V_cell min/max (used)`: the signals used by BMS logic after overrides/injections.
+- If you apply overrides/injections, **used can differ from true**.
+
+**State timeline**
+- `state_code`: OFF=0, RUN=1, FAULT=2, EMERGENCY=3
+- `fault_any`: 1 if any of UV/OV/OT/UT/OC/FIRE is true (debounced)
+
+**Derating markers**
+- Vertical lines mark times where `I_act != I_req` (limits active).
+
+**Trigger timing**
+- With `debounce_steps=N` and `dt=dt_s`, expect first trigger at:
+  `t_trigger ≈ t_inject + (N-1)*dt_s`
+"""
+    )

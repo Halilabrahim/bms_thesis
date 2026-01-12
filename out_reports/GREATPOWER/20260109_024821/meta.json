@@ -1,0 +1,20 @@
+{
+  "profile": "GREATPOWER",
+  "params_path": "data/params_rack_greatpower.yaml",
+  "scenarios_path": "data/scenarios_greatpower.yaml",
+  "dt_s": 1.0,
+  "generated_at": "20260109_024821",
+  "scenario_ids": [
+    "GP_S1_nominal_25C_1C",
+    "GP_S3_nominal_-10C_0p5C",
+    "GP_S5_uv_fault_injection",
+    "GP_S6_ov_fault_injection",
+    "GP_S7_ot_fault_injection",
+    "GP_S8_oc_fault_injection",
+    "GP_S9_fire_gas_alarm_injection",
+    "GP_S10_ekf_convergence_mismatch",
+    "GP_S11_voltage_window_derate_demo",
+    "GP_S13_charge_0C_cutoff",
+    "GP_S14_charge_5C_derate_demo"
+  ]
+}

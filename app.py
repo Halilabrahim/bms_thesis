@@ -1,4 +1,4 @@
-# Home.py  (VEYA senin "streamlit run <...>" ile çalıştırdığın entry dosya)
+# app.py (Home)
 from __future__ import annotations
 
 from datetime import date
@@ -6,27 +6,52 @@ from typing import Any, Dict
 
 import streamlit as st
 
-from src.config import load_params
+from src.config import load_params, PROFILES  # DEFAULT_PROFILE import ETME
 
 
-# ---------------- Cache ----------------
-@st.cache_data
-def get_params() -> Dict[str, Any]:
-    return load_params()
-
-
-# ---------------- Page ----------------
 st.set_page_config(page_title="BMS Rack Playground — Thesis Demo", layout="wide")
 
+
+@st.cache_data
+def get_params(cfg_path: str) -> Dict[str, Any]:
+    return load_params(cfg_path)
+
+
+# --- Profile selection (Option A) ---
+profiles = list(PROFILES.keys())
+DEFAULT_PROFILE = "LUNA" if "LUNA" in PROFILES else profiles[0]
+
+if "active_profile" not in st.session_state:
+    st.session_state.active_profile = DEFAULT_PROFILE
+
+st.sidebar.selectbox("Rack profile", profiles, key="active_profile")
+
+active = st.session_state.active_profile
+st.session_state.active_config_path = PROFILES[active]["params"]
+st.session_state.active_scenarios_path = PROFILES[active]["scenarios"]
+
+cfg_path = st.session_state.active_config_path
+try:
+    params = get_params(cfg_path)
+except Exception as e:
+    st.error("Failed to load YAML config for selected profile.")
+    st.code(f"{cfg_path}\n\n{e}")
+    st.stop()
+
+# ---------------- Page ----------------
 st.title("BMS Rack Playground — Master Thesis Demo")
 st.caption("Python-based offline simulation and validation of single-rack BMS functions.")
+
+st.sidebar.success(f"Active profile: {active}")
+st.sidebar.caption(f"Config: {cfg_path}")
+
 
 # --- Thesis meta (edit here anytime) ---
 AUTHOR = "Halil İbrahim AYDIN"
 THESIS_SCOPE = (
     "Offline simulation and deterministic validation of single-rack BMS functions "
-    "(limits, fault detection, FSM reactions, and EKF-based SoC estimation) "
-    "using a Huawei LUNA-inspired reference rack model."
+    "(limits, fault detection, FSM reactions, and EKF-based SoC estimation). "
+    "Profiles: Huawei LUNA reference + Great Power 1P416S rack."
 )
 
 THESIS_TITLE = "Python Based Development of Battery Management System Functions"
@@ -35,8 +60,6 @@ INDUSTRY_ADVISOR = "Harun Köle — Technical Manager at Saves Enerji"
 START_DATE = date(2025, 9, 24)
 SUBMISSION_DEADLINE = date(2026, 3, 24)
 THESIS_PERIOD_MONTHS = 6
-
-params = get_params()
 
 st.subheader("Thesis information")
 st.markdown(
@@ -52,6 +75,8 @@ st.markdown(
 **Scope:** {THESIS_SCOPE}
 """
 )
+
+# (Aşağıdaki expander/metin kısımlarını senin eski dosyandan aynen bırakabilirsin.)
 
 with st.expander("Original thesis proposal (as submitted)", expanded=True):
     st.markdown(

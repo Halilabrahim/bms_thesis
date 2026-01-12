@@ -82,20 +82,40 @@ def build_models(params: Dict[str, Any], soh_profile: Optional[Dict[str, Any]] =
     ekf = SoCEstimatorEKF(ekf_params, soc_init=1.0)
 
     # --- BMS current limit params ---
+    # Robust fallback strategy:
+    # - Keep legacy fields for backward compatibility
+    # - If legacy keys are missing, fall back to discharge split keys (sensible default)
+    t_low_cutoff_c = float(ctrl_cfg.get("t_low_cutoff_c", ctrl_cfg.get("t_low_cutoff_discharge_c", -30.0)))
+    t_low_derate_start_c = float(ctrl_cfg.get("t_low_derate_start_c", ctrl_cfg.get("t_low_derate_start_discharge_c", 0.0)))
+
     bms_params = BMSControlParams(
         i_charge_max_a=float(limits["i_charge_max_a"]),
         i_discharge_max_a=float(limits["i_discharge_max_a"]),
+
         soc_low_cutoff=float(ctrl_cfg["soc_low_cutoff"]),
         soc_low_derate_start=float(ctrl_cfg["soc_low_derate_start"]),
         soc_high_cutoff=float(ctrl_cfg["soc_high_cutoff"]),
         soc_high_derate_start=float(ctrl_cfg["soc_high_derate_start"]),
-        t_low_cutoff_c=float(ctrl_cfg["t_low_cutoff_c"]),
-        t_low_derate_start_c=float(ctrl_cfg["t_low_derate_start_c"]),
+
+        # legacy (kept)
+        t_low_cutoff_c=t_low_cutoff_c,
+        t_low_derate_start_c=t_low_derate_start_c,
+
         t_high_cutoff_c=float(ctrl_cfg["t_high_cutoff_c"]),
         t_high_derate_start_c=float(ctrl_cfg["t_high_derate_start_c"]),
+
+        # split low-temp (preferred)
+        t_low_cutoff_discharge_c=float(ctrl_cfg["t_low_cutoff_discharge_c"]) if "t_low_cutoff_discharge_c" in ctrl_cfg else None,
+        t_low_derate_start_discharge_c=float(ctrl_cfg["t_low_derate_start_discharge_c"]) if "t_low_derate_start_discharge_c" in ctrl_cfg else None,
+        t_low_cutoff_charge_c=float(ctrl_cfg["t_low_cutoff_charge_c"]) if "t_low_cutoff_charge_c" in ctrl_cfg else None,
+        t_low_derate_start_charge_c=float(ctrl_cfg["t_low_derate_start_charge_c"]) if "t_low_derate_start_charge_c" in ctrl_cfg else None,
+
         v_cell_min_v=float(limits["v_cell_min_v"]),
         v_cell_max_v=float(limits["v_cell_max_v"]),
-        v_margin_v=float(ctrl_cfg["v_margin_v"]),
+
+        v_margin_v=float(ctrl_cfg.get("v_margin_v", 0.10)),
+        v_margin_low_v=float(ctrl_cfg["v_margin_low_v"]) if "v_margin_low_v" in ctrl_cfg else None,
+        v_margin_high_v=float(ctrl_cfg["v_margin_high_v"]) if "v_margin_high_v" in ctrl_cfg else None,
     )
 
     # --- Fault thresholds ---
@@ -318,8 +338,23 @@ def run_scenario(scenario: Scenario, params: Dict[str, Any]) -> Dict[str, List[f
         "v_cell_min_true_v", "v_cell_max_true_v",
         "t_rack_used_c", "i_rack_used_a",
         "state_code",
-        "oc", "ov", "uv", "ot", "fire",
+        "oc", "ut", "ov", "uv", "ot", "fire",
         "soc_cell_min", "soc_cell_max", "soc_cell_mean",
+
+        # --- BMS derating debug time-series (NEW) ---
+        "scale_t_low_dis",
+        "scale_t_low_chg",
+        "scale_t_high",
+        "scale_dis_total",
+        "scale_chg_total",
+        "scale_soc_dis",
+        "scale_soc_chg",
+        "scale_v_dis",
+        "scale_v_chg",
+        "code_limit_dis",
+        "code_limit_chg",
+        "i_discharge_max_allowed",
+        "i_charge_max_allowed",
     ]}
 
     n_steps = int(np.ceil(max_time_s / dt_s)) if max_time_s > 0 else 0
@@ -440,21 +475,42 @@ def run_scenario(scenario: Scenario, params: Dict[str, Any]) -> Dict[str, List[f
             t_s, vmin_lim, vmax_lim, t_lim, 0.0, seg_obj
         )
 
+        # --- Always compute limit debug (even if limits disabled) ---
+        # This is what RUN logic "would allow" given current visible signals.
+        try:
+            lim_dbg = compute_current_limits(
+                soc_hat=float(soc_hat),
+                t_rack_c=float(t_lim),
+                v_cell_min=float(vmin_lim),
+                v_cell_max=float(vmax_lim),
+                params=bms_params,
+            )
+        except Exception:
+            lim_dbg = {
+                "i_discharge_max_allowed": 0.0,
+                "i_charge_max_allowed": 0.0,
+                "scale_t_low_dis": 0.0,
+                "scale_t_low_chg": 0.0,
+                "scale_t_high": 0.0,
+                "scale_dis_total": 0.0,
+                "scale_chg_total": 0.0,
+                "scale_soc_dis": 0.0,
+                "scale_soc_chg": 0.0,
+                "scale_v_dis": 0.0,
+                "scale_v_chg": 0.0,
+                "code_limit_dis": 0.0,
+                "code_limit_chg": 0.0,
+            }
+
         if fsm.state in (BMSState.FAULT, BMSState.EMERGENCY_SHUTDOWN):
             i_act = 0.0
         else:
             if bool(getattr(scenario, "use_bms_limits", True)):
-                lim = compute_current_limits(
-                    soc_hat=float(soc_hat),
-                    t_rack_c=float(t_lim),
-                    v_cell_min=float(vmin_lim),
-                    v_cell_max=float(vmax_lim),
-                    params=bms_params,
-                )
+                # Use the computed debug limits for actual limiting
                 if i_req >= 0:
-                    i_act = min(i_req, float(lim["i_discharge_max_allowed"]))
+                    i_act = min(i_req, float(lim_dbg["i_discharge_max_allowed"]))
                 else:
-                    i_act = max(i_req, -float(lim["i_charge_max_allowed"]))
+                    i_act = max(i_req, -float(lim_dbg["i_charge_max_allowed"]))
             else:
                 i_act = i_req
 
@@ -514,10 +570,26 @@ def run_scenario(scenario: Scenario, params: Dict[str, Any]) -> Dict[str, List[f
         hist["uv"].append(1.0 if bool(flags["uv"]) else 0.0)
         hist["ot"].append(1.0 if bool(flags["ot"]) else 0.0)
         hist["fire"].append(1.0 if bool(flags["fire"]) else 0.0)
+        hist["ut"].append(1.0 if bool(flags.get("ut", False)) else 0.0)
 
         hist["soc_cell_min"].append(float(res.get("soc_cell_min", res["soc"])))
         hist["soc_cell_max"].append(float(res.get("soc_cell_max", res["soc"])))
         hist["soc_cell_mean"].append(float(res.get("soc_cell_mean", res["soc"])))
+
+        # --- NEW: log BMS debug scalars (time-series) ---
+        hist["scale_t_low_dis"].append(float(lim_dbg.get("scale_t_low_dis", 0.0)))
+        hist["scale_t_low_chg"].append(float(lim_dbg.get("scale_t_low_chg", 0.0)))
+        hist["scale_t_high"].append(float(lim_dbg.get("scale_t_high", 0.0)))
+        hist["scale_dis_total"].append(float(lim_dbg.get("scale_dis_total", 0.0)))
+        hist["scale_chg_total"].append(float(lim_dbg.get("scale_chg_total", 0.0)))
+        hist["scale_soc_dis"].append(float(lim_dbg.get("scale_soc_dis", 0.0)))
+        hist["scale_soc_chg"].append(float(lim_dbg.get("scale_soc_chg", 0.0)))
+        hist["scale_v_dis"].append(float(lim_dbg.get("scale_v_dis", 0.0)))
+        hist["scale_v_chg"].append(float(lim_dbg.get("scale_v_chg", 0.0)))
+        hist["code_limit_dis"].append(float(lim_dbg.get("code_limit_dis", 0.0)))
+        hist["code_limit_chg"].append(float(lim_dbg.get("code_limit_chg", 0.0)))
+        hist["i_discharge_max_allowed"].append(float(lim_dbg.get("i_discharge_max_allowed", 0.0)))
+        hist["i_charge_max_allowed"].append(float(lim_dbg.get("i_charge_max_allowed", 0.0)))
 
         if bool(getattr(scenario, "stop_on_emergency", False)) and state == BMSState.EMERGENCY_SHUTDOWN:
             break

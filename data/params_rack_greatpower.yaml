@@ -1,0 +1,189 @@
+meta:
+  system_name: Rack model inspired by Great Power Max-20HC-3720-1P (single rack / cluster)
+  version: 0.2-greatpower-draft
+
+chemistry:
+  name: LFP
+  nominal_cell_voltage_v: 3.2
+  cell_capacity_ah: 280.0
+
+structure:
+  cells_in_series_per_pack: 104
+  cells_in_parallel_per_pack: 1
+  packs_in_series_per_rack: 4
+  racks_in_ess: 1
+
+pack:
+  rated_voltage_v: 332.8
+  nominal_energy_kwh: 93.184
+  cell_voltage_min_v: 2.5
+  cell_voltage_max_v: 3.65
+  product_model: PLL03C2-D1P104S-A01
+  combination_method: 1P104S
+
+  # Datasheet: max voltage range (2.6~3.6 V/cell) -> 104S
+  max_voltage_range_v: [270.4, 374.4]
+  # Datasheet: recommended (2.8~3.55 V/cell) -> 104S
+  recommended_voltage_range_v: [291.2, 369.2]
+
+  rated_power_kw: 93.0
+  rated_current_a: 280.0
+  max_current_a_5min: 320.0
+  communication_protocol: CAN
+
+rack:
+  nominal_voltage_v: 1331.2
+  nominal_energy_kwh: 372.736
+  model: RLL03C2-D1P104S1R4-A01
+  combination: 1P416S
+
+  # FIX: use datasheet ranges for 416S
+  max_voltage_range_v: [1081.6, 1497.6]
+  recommended_voltage_range_v: [1164.8, 1476.8]
+  v_min_v: 1081.6
+  v_max_v: 1497.6
+
+  rated_power_kw: 372.0
+  rated_current_a: 280.0
+  max_current_a_5min: 320.0
+
+hardware:
+  rated_operating_voltage_v: 1331.2
+  max_dc_voltage_v: 1500.0
+  min_startup_voltage_v: 900.0
+  rated_power_per_string_kw: 93.0
+  rated_power_per_rack_kw: 372.0
+  rated_current_per_string_a: 280.0
+  rated_current_per_rack_a: 280.0
+
+electrical_model:
+  type: ECM_2RC
+  q_nom_ah: 280.0
+  ocv_soc_table_file: data/ocv_lfp_280ah_typical.csv
+  r0_ohm: 0.09
+  r1_ohm: 0.03
+  c1_f: 8000.0
+  r2_ohm: 0.015
+  c2_f: 25000.0
+
+soh_profiles:
+  fresh:
+    capacity_scale: 1.0
+    r0_scale: 1.0
+  aged_80cap_150r0:
+    capacity_scale: 0.8
+    r0_scale: 1.5
+
+thermal_model:
+  type: lumped_RC
+  c_th_j_per_k: 3000000.0
+  r_th_k_per_w: 0.015
+  t_init_c: 25.0
+
+limits:
+  # FIX: align with datasheet 2.6~3.6 V/cell range for normal operation
+  v_cell_min_v: 2.6
+  v_cell_max_v: 3.60
+  v_rack_min_v: 1081.6
+  v_rack_max_v: 1497.6
+
+  t_min_c: -30.0
+  t_max_c: 60.0
+
+  # Note: kept at 320 to allow 5-min peak scenario; document as "peak-enabled"
+  i_charge_max_a: 320.0
+  i_discharge_max_a: 320.0
+  i_derating_temp_c: 40.0
+
+estimation:
+  soc_method: EKF
+  soh_method: R0_and_capacity
+  ekf:
+    q_process:
+      soc: 1.0e-07
+      v_rc1: 1.0e-05
+      v_rc2: 1.0e-05
+    r_measurement:
+      v_terminal: 0.0001
+    initial_covariance:
+      soc: 0.001
+      v_rc1: 0.01
+      v_rc2: 0.01
+  soh:
+    # FIX: keep consistent with electrical_model
+    r0_nominal_ohm: 0.09
+    q_nominal_ah: 280.0
+    adaptation_gain_q: 1.0e-06
+    adaptation_gain_r0: 1.0e-06
+
+sensors:
+  voltage_noise_std_v: 0.02
+  current_noise_std_a: 0.5
+  temp_noise_std_c: 0.1
+  seed: 42
+
+bms_control:
+  soc_low_cutoff: 0.05
+  soc_low_derate_start: 0.1
+  soc_high_cutoff: 0.95
+  soc_high_derate_start: 0.9
+
+  # legacy (fallback)
+  t_low_cutoff_c: -30.0
+  t_low_derate_start_c: 0.0
+
+  # preferred split (matches datasheet logic)
+  t_low_cutoff_discharge_c: -30.0
+  t_low_derate_start_discharge_c: 0.0
+  t_low_cutoff_charge_c: 0.0
+  t_low_derate_start_charge_c: 10.0
+
+  t_high_cutoff_c: 60.0
+  t_high_derate_start_c: 50.0
+
+  v_margin_v: 0.05
+  v_margin_low_v: 0.05
+  v_margin_high_v: 0.05
+
+faults:
+  debounce_steps: 3
+
+  # Hard limits (beyond "limits" operational window)
+  ov_cell_v: 3.65
+  uv_cell_v: 2.5
+
+  ot_rack_c: 60.0
+  ut_rack_c: -30.0
+
+  oc_discharge_a: 360.0
+  oc_charge_a: 360.0
+
+  fire_temp_c: 80.0
+  fire_dTdt_c_per_s: 0.05
+
+fire_detection:
+  gas_threshold_ppm: 2000
+  temp_threshold_c: 80.0
+  dTdt_threshold_c_per_s: 0.5
+  debounce_steps: 3
+
+cell_variation:
+  enable: true
+  capacity_sigma_rel: 0.05
+  r0_sigma_rel: 0.05
+  soc0_sigma_abs: 0.02
+  q_spread_pct: 5.0
+  r0_spread_pct: 5.0
+  seed: 123
+
+simulation:
+  dt_s: 1.0
+  t_end_s: 3600.0
+  log_interval_s: 1.0
+
+explosion_protection:
+  h2_level1_percent_lel: 10.0
+  h2_level2_percent_lel: 25.0
+  co_level1_ppm: 35.0
+  co_level2_ppm: 200.0
+  fan_min_run_time_s: 300

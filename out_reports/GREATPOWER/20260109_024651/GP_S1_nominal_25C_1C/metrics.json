@@ -1,0 +1,34 @@
+{
+  "safety": {
+    "t_fault_any_s": null,
+    "t_emergency_s": null,
+    "t_oc_s": null,
+    "t_ov_s": null,
+    "t_uv_s": null,
+    "t_ot_s": null,
+    "t_ut_s": null,
+    "t_fire_s": null
+  },
+  "operational": {
+    "energy_discharge_kwh": 340.2588435604053,
+    "energy_charge_kwh": 0.0,
+    "energy_net_kwh": 340.2588435604053,
+    "energy_abs_kwh": 340.2588435604053,
+    "soc_delta": 0.9132190127460653,
+    "t_total_s": 3600.0,
+    "t_discharge_s": 3549.0,
+    "t_charge_s": 0.0,
+    "t_max_c": 32.41598536235019,
+    "t_rack_max_c": 32.41598536235019,
+    "delta_t_c": 7.413633362350193,
+    "v_rack_min_v": 1296.5367758996645,
+    "v_rack_max_v": 1409.8380393587445,
+    "i_rack_min_a": 0.0,
+    "i_rack_max_a": 280.0
+  },
+  "estimation": {
+    "rmse_soc": 0.010669074500465356,
+    "max_abs_error_soc": 0.03754130040832035,
+    "p95_abs_error_soc": 0.036483860676344584
+  }
+}

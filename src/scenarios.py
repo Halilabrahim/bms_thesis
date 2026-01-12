@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional
 
 import yaml
 
@@ -77,6 +77,14 @@ class Scenario:
     ot_inject_time_s: Optional[float] = None
     fire_inject_time_s: Optional[float] = None
 
+    # optional durations (seconds). Missing/None/<=0 => step/latched after start
+    uv_inject_duration_s: Optional[float] = None
+    ov_inject_duration_s: Optional[float] = None
+    oc_inject_duration_s: Optional[float] = None
+    ot_inject_duration_s: Optional[float] = None
+    fire_inject_duration_s: Optional[float] = None
+
+    # injection values
     uv_v_cell_min_v: float = 2.0
     ov_v_cell_max_v: float = 3.7
     oc_i_rack_a: float = 500.0
@@ -100,14 +108,43 @@ def _as_float(x: Any, default: Optional[float]) -> Optional[float]:
 def _as_bool(x: Any, default: bool) -> bool:
     if x is None:
         return default
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return bool(x)
+    if isinstance(x, str):
+        s = x.strip().lower()
+        if s in ("true", "yes", "y", "1", "on"):
+            return True
+        if s in ("false", "no", "n", "0", "off", ""):
+            return False
     return bool(x)
+
+
+def _f(x: Any, default: float) -> float:
+    v = _as_float(x, None)
+    return default if v is None else float(v)
+
+
+def _fo(x: Any) -> Optional[float]:
+    # float-or-none helper
+    return _as_float(x, None)
+
+
+def _i(x: Any, default: int) -> int:
+    if x is None:
+        return default
+    try:
+        return int(x)
+    except Exception:
+        return default
 
 
 def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
     """
-    Backwards-compatible loader for your scenarios.yaml.
+    Backwards-compatible loader for scenarios.yaml.
 
-    Expected keys per scenario (matches your current file):
+    Expected keys per scenario:
       id, description, t_amb_c
       profile: {type, direction, current_a, use_bms_limits}
       stop_conditions: {max_time_s, stop_on_emergency}
@@ -115,7 +152,11 @@ def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
       soh_profile: dict or string
 
     Optional extension:
-      injection: {uv_time_s, ..., fire_time_s, uv_v_cell_min_v, ..., ot_t_rack_c}
+      injection: {
+        uv_time_s, ov_time_s, oc_time_s, ot_time_s, fire_time_s,
+        uv_duration_s, ov_duration_s, oc_duration_s, ot_duration_s, fire_duration_s,
+        uv_v_cell_min_v, ov_v_cell_max_v, oc_i_rack_a, ot_t_rack_c
+      }
       profile.type: "segments" + profile.segments: [...]
     """
     p = Path(path)
@@ -142,25 +183,28 @@ def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
             id=str(it["id"]),
             description=str(it.get("description", "")),
             profile_type=str(prof.get("type", "constant_current")).strip().lower(),
-            t_amb_c=float(_as_float(it.get("t_amb_c"), 25.0) or 25.0),
-            max_time_s=float(_as_float(stop_cfg.get("max_time_s"), 3600.0) or 3600.0),
+
+            t_amb_c=_f(it.get("t_amb_c"), 25.0),
+            max_time_s=_f(stop_cfg.get("max_time_s"), 3600.0),
+
             stop_on_emergency=_as_bool(stop_cfg.get("stop_on_emergency"), False),
             use_bms_limits=_as_bool(prof.get("use_bms_limits"), True),
-            true_init_soc=float(_as_float(init_cfg.get("true_soc"), 1.0) or 1.0),
-            ekf_init_soc=_as_float(init_cfg.get("ekf_soc"), None),
+
+            true_init_soc=_f(init_cfg.get("true_soc"), 1.0),
+            ekf_init_soc=_fo(init_cfg.get("ekf_soc")),
             soh_profile=it.get("soh_profile", None),
         )
 
         if scn.profile_type == "constant_current":
             scn.direction = str(prof.get("direction", "discharge")).strip().lower()
-            scn.current_a = float(_as_float(prof.get("current_a"), 0.0) or 0.0)
+            scn.current_a = _f(prof.get("current_a"), 0.0)
 
         elif scn.profile_type == "random_current":
-            scn.i_discharge_max_a = float(_as_float(prof.get("i_discharge_max_a"), scn.i_discharge_max_a) or scn.i_discharge_max_a)
-            scn.i_charge_max_a = float(_as_float(prof.get("i_charge_max_a"), scn.i_charge_max_a) or scn.i_charge_max_a)
-            scn.segment_min_s = float(_as_float(prof.get("segment_min_s"), scn.segment_min_s) or scn.segment_min_s)
-            scn.segment_max_s = float(_as_float(prof.get("segment_max_s"), scn.segment_max_s) or scn.segment_max_s)
-            scn.random_seed = int(prof.get("random_seed", scn.random_seed) or scn.random_seed)
+            scn.i_discharge_max_a = _f(prof.get("i_discharge_max_a"), scn.i_discharge_max_a)
+            scn.i_charge_max_a = _f(prof.get("i_charge_max_a"), scn.i_charge_max_a)
+            scn.segment_min_s = _f(prof.get("segment_min_s"), scn.segment_min_s)
+            scn.segment_max_s = _f(prof.get("segment_max_s"), scn.segment_max_s)
+            scn.random_seed = _i(prof.get("random_seed"), scn.random_seed)
 
         elif scn.profile_type == "segments":
             seg_list = prof.get("segments", []) or []
@@ -168,9 +212,9 @@ def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
                 for s in seg_list:
                     if not isinstance(s, dict):
                         continue
-                    dur = _as_float(s.get("duration_s"), None)
-                    cur = _as_float(s.get("current_a"), None)
-                    Ta = _as_float(s.get("t_amb_c"), None)
+                    dur = _fo(s.get("duration_s"))
+                    cur = _fo(s.get("current_a"))
+                    Ta = _fo(s.get("t_amb_c"))
                     if dur is None or cur is None or Ta is None or dur <= 0:
                         continue
                     scn.segments.append(
@@ -178,10 +222,10 @@ def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
                             duration_s=float(dur),
                             current_a=float(cur),
                             t_amb_c=float(Ta),
-                            v_cell_min_override_v=_as_float(s.get("v_cell_min_override_v"), None),
-                            v_cell_max_override_v=_as_float(s.get("v_cell_max_override_v"), None),
-                            t_rack_override_c=_as_float(s.get("t_rack_override_c"), None),
-                            i_rack_override_a=_as_float(s.get("i_rack_override_a"), None),
+                            v_cell_min_override_v=_fo(s.get("v_cell_min_override_v")),
+                            v_cell_max_override_v=_fo(s.get("v_cell_max_override_v")),
+                            t_rack_override_c=_fo(s.get("t_rack_override_c")),
+                            i_rack_override_a=_fo(s.get("i_rack_override_a")),
                             gas_alarm=_as_bool(s.get("gas_alarm"), False),
                         )
                     )
@@ -190,16 +234,25 @@ def load_scenarios(path: str = "data/scenarios.yaml") -> List[Scenario]:
 
         inj = it.get("injection", {}) or {}
         if isinstance(inj, dict):
-            scn.uv_inject_time_s = _as_float(inj.get("uv_time_s"), None)
-            scn.ov_inject_time_s = _as_float(inj.get("ov_time_s"), None)
-            scn.oc_inject_time_s = _as_float(inj.get("oc_time_s"), None)
-            scn.ot_inject_time_s = _as_float(inj.get("ot_time_s"), None)
-            scn.fire_inject_time_s = _as_float(inj.get("fire_time_s"), None)
+            # times
+            scn.uv_inject_time_s = _fo(inj.get("uv_time_s"))
+            scn.ov_inject_time_s = _fo(inj.get("ov_time_s"))
+            scn.oc_inject_time_s = _fo(inj.get("oc_time_s"))
+            scn.ot_inject_time_s = _fo(inj.get("ot_time_s"))
+            scn.fire_inject_time_s = _fo(inj.get("fire_time_s"))
 
-            scn.uv_v_cell_min_v = float(_as_float(inj.get("uv_v_cell_min_v"), scn.uv_v_cell_min_v) or scn.uv_v_cell_min_v)
-            scn.ov_v_cell_max_v = float(_as_float(inj.get("ov_v_cell_max_v"), scn.ov_v_cell_max_v) or scn.ov_v_cell_max_v)
-            scn.oc_i_rack_a = float(_as_float(inj.get("oc_i_rack_a"), scn.oc_i_rack_a) or scn.oc_i_rack_a)
-            scn.ot_t_rack_c = float(_as_float(inj.get("ot_t_rack_c"), scn.ot_t_rack_c) or scn.ot_t_rack_c)
+            # durations (support both *duration_s and *inject_duration_s keys)
+            scn.uv_inject_duration_s = _fo(inj.get("uv_duration_s", inj.get("uv_inject_duration_s")))
+            scn.ov_inject_duration_s = _fo(inj.get("ov_duration_s", inj.get("ov_inject_duration_s")))
+            scn.oc_inject_duration_s = _fo(inj.get("oc_duration_s", inj.get("oc_inject_duration_s")))
+            scn.ot_inject_duration_s = _fo(inj.get("ot_duration_s", inj.get("ot_inject_duration_s")))
+            scn.fire_inject_duration_s = _fo(inj.get("fire_duration_s", inj.get("fire_inject_duration_s")))
+
+            # values (NO "or" usage -> 0.0 stays 0.0)
+            scn.uv_v_cell_min_v = _f(inj.get("uv_v_cell_min_v"), scn.uv_v_cell_min_v)
+            scn.ov_v_cell_max_v = _f(inj.get("ov_v_cell_max_v"), scn.ov_v_cell_max_v)
+            scn.oc_i_rack_a = _f(inj.get("oc_i_rack_a"), scn.oc_i_rack_a)
+            scn.ot_t_rack_c = _f(inj.get("ot_t_rack_c"), scn.ot_t_rack_c)
 
         out.append(scn)
 

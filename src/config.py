@@ -5,6 +5,17 @@ from pathlib import Path
 import warnings
 import yaml
 
+# --- Rack profile registry (Option A) ---
+PROFILES = {
+    "LUNA": {
+        "params": "data/params_rack.yaml",
+        "scenarios": "data/scenarios.yaml",
+    },
+    "GREATPOWER": {
+        "params": "data/params_rack_greatpower.yaml",
+        "scenarios": "data/scenarios_greatpower.yaml",
+    },
+}
 
 def _project_root() -> Path:
     # src/config.py -> src/ -> project root

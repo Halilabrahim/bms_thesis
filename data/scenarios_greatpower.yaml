@@ -1,0 +1,214 @@
+scenarios:
+- id: GP_S1_nominal_25C_1C
+  description: Nominal 1C (280A) discharge at 25°C with BMS current limitation.
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 280.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 3600.0
+    stop_on_emergency: true
+  init:
+    true_soc: 1.0
+    ekf_soc: 1.0
+- id: GP_S2_nominal_0C_1C
+  description: Nominal 1C (280A) discharge at 0°C ambient.
+  t_amb_c: 0.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 280.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 3600.0
+    stop_on_emergency: true
+  init:
+    true_soc: 1.0
+    ekf_soc: 1.0
+- id: GP_S3_nominal_-10C_0p5C
+  description: Cold discharge at -10°C, 0.5C (140A). Used to validate temperature
+    derating / limits.
+  t_amb_c: -10.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 140.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 7200.0
+    stop_on_emergency: true
+  init:
+    true_soc: 1.0
+    ekf_soc: 1.0
+- id: GP_S4_charge_25C_0p5C
+  description: Charge at 25°C, 0.5C (140A).
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: charge
+    current_a: 140.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 7200.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.2
+    ekf_soc: 0.2
+- id: GP_S5_uv_fault_injection
+  description: Under-voltage fault (deterministic injection) during discharge at 25°C.
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 200.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 1200.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.3
+    ekf_soc: 0.3
+  injection:
+    uv_time_s: 60.0
+    uv_v_cell_min_v: 2.45
+- id: GP_S6_ov_fault_injection
+  description: Over-voltage fault (deterministic injection) during charge at 25°C.
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: charge
+    current_a: 120.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 1200.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.8
+    ekf_soc: 0.8
+  injection:
+    ov_time_s: 60.0
+    ov_v_cell_max_v: 3.75
+- id: GP_S7_ot_fault_injection
+  description: Over-temperature fault (deterministic injection) at 25°C.
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 250.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 1800.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.6
+    ekf_soc: 0.6
+  injection:
+    ot_time_s: 120.0
+    ot_t_rack_c: 70.0
+- id: GP_S8_oc_fault_injection
+  description: Over-current fault (deterministic injection) at 25°C.
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 280.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 600.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.7
+    ekf_soc: 0.7
+  injection:
+    oc_time_s: 30.0
+    oc_i_rack_a: 420.0
+- id: GP_S9_fire_gas_alarm_injection
+  description: Fire/Gas alarm pathway test (injected gas_alarm at t=1200s).
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 180.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 2400.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.5
+    ekf_soc: 0.5
+  injection:
+    fire_time_s: 1200.0
+- id: GP_S10_ekf_convergence_mismatch
+  description: 'EKF convergence demo: true SoC differs from EKF initial SoC.'
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 120.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 1800.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.8
+    ekf_soc: 0.6
+- id: GP_S11_voltage_window_derate_demo
+  description: Voltage-window derating demonstration (starts near upper region).
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: charge
+    current_a: 140.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 1200.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.9
+    ekf_soc: 0.9
+- id: GP_S12_peak_25C_320A_5min
+  description: 'Peak discharge current capability test: 320 A for 5 minutes (300 s)
+    at 25°C (BMS limits enabled).'
+  t_amb_c: 25.0
+  profile:
+    type: constant_current
+    direction: discharge
+    current_a: 320.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 300.0
+    stop_on_emergency: true
+  init:
+    true_soc: 1.0
+    ekf_soc: 1.0
+- id: GP_S13_charge_0C_cutoff
+  description: Charge at 0°C to verify CHARGE low-temp cutoff (expected i_act ~ 0 A due to t_low_cutoff_charge_c=0°C).
+  t_amb_c: 0.0
+  profile:
+    type: constant_current
+    direction: charge
+    current_a: 80.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 600.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.5
+    ekf_soc: 0.5
+
+- id: GP_S14_charge_5C_derate_demo
+  description: Charge at 5°C to verify linear derate for charge (expected ~50% temp scale between 0°C and 10°C).
+  t_amb_c: 5.0
+  profile:
+    type: constant_current
+    direction: charge
+    current_a: 200.0
+    use_bms_limits: true
+  stop_conditions:
+    max_time_s: 600.0
+    stop_on_emergency: true
+  init:
+    true_soc: 0.5
+    ekf_soc: 0.5

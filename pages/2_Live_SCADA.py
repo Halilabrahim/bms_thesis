@@ -10,7 +10,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from config import load_params
+from config import load_params, PROFILES
 from scada_playground_ui import render_scada_playground
 
 st.set_page_config(page_title="Live SCADA", layout="wide")
@@ -51,6 +51,13 @@ if apply_cfg:
 
     st.rerun()
 
+profiles = list(PROFILES.keys())
+if "active_profile" not in st.session_state:
+    st.session_state.active_profile = profiles[0]
+
+st.sidebar.selectbox("Rack profile", profiles, key="active_profile")
+
+st.session_state.active_config_path = PROFILES[st.session_state.active_profile]["params"]
 cfg_path = str(st.session_state.active_config_path)
 
 try:
