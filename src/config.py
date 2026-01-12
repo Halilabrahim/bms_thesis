@@ -134,16 +134,3 @@ def load_params(path: str = "data/params_rack.yaml", *, validate: bool = True) -
 
     return params
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]   # .../src/config.py -> repo root
-DATA_DIR = PROJECT_ROOT / "data"
-
-def _build_profiles() -> dict:
-    candidates = {
-        "LUNA": DATA_DIR / "params_rack.yaml",
-        "GREATPOWER": DATA_DIR / "params_rack_greatpower.yaml",
-    }
-    # Dosya yoksa crash etmesin diye sadece mevcut olanları ekliyoruz
-    return {k: str(v) for k, v in candidates.items() if v.exists()}
-
-PROFILES = _build_profiles()
-DEFAULT_PROFILE = "LUNA"
